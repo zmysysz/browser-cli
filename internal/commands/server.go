@@ -306,6 +306,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 		Headless:   serverHeadless,
 		SocketPath: serverSocket,
 		SessionID:  sessionID,
+		Proxy:      proxy,
 	}
 
 	server, err := browser.NewServer(cfg)
@@ -341,6 +342,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		Headless:   serverHeadless,
 		SocketPath: serverSocket,
 		SessionID:  sessionID,
+		Proxy:      proxy,
 	}
 
 	server, err := browser.NewServer(cfg)
@@ -426,11 +428,14 @@ func ensureServer() (*browser.Client, error) {
 	}
 
 	// Server not running, start it in background
-	serverCmd := exec.Command(os.Args[0], "server-start", "--headless")
+	serverCmd := exec.Command(os.Args[0], "server-start")
 	if sessionID != "" {
 		serverCmd.Args = append(serverCmd.Args, "--session", sessionID)
 	}
-	if !headless {
+	// Add headless flag based on current setting
+	if headless {
+		serverCmd.Args = append(serverCmd.Args, "--headless")
+	} else {
 		serverCmd.Args = append(serverCmd.Args, "--headless=false")
 	}
 
@@ -440,7 +445,7 @@ func ensureServer() (*browser.Client, error) {
 	}
 
 	// Wait for server to be ready (increased timeout for Playwright initialization)
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 60; i++ { // 60 * 500ms = 30 seconds
 		time.Sleep(500 * time.Millisecond)
 		resp, err = client.SendCommand(browser.Command{Action: "status"})
 		if err == nil && resp.Success {
@@ -448,7 +453,7 @@ func ensureServer() (*browser.Client, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("server failed to start within 15 seconds")
+	return nil, fmt.Errorf("server failed to start within 30 seconds")
 }
 
 // sendCommand sends a command to the server and outputs the result
@@ -461,6 +466,13 @@ func sendCommand(action string, params map[string]interface{}) error {
 	cmd := browser.Command{
 		Action: action,
 		Params: params,
+	}
+
+	// Extract tab_id from params if present
+	if tabID, ok := params["tab_id"]; ok {
+		if id, ok := tabID.(int); ok {
+			cmd.TabID = id
+		}
 	}
 
 	resp, err := client.SendCommand(cmd)

@@ -11,10 +11,111 @@ import (
 func (b *Browser) Click(selector string, timeout time.Duration) error {
 	err := b.page.Click(selector, playwright.PageClickOptions{
 		Timeout: playwright.Float(float64(timeout.Milliseconds())),
+		Force:   playwright.Bool(true),
 	})
 	if err != nil {
 		return fmt.Errorf("click failed: %w", err)
 	}
+	return nil
+}
+
+// SmartClick intelligently clicks an element, handling Web Components automatically
+// It tries multiple methods: regular click, Shadow DOM click, auto-detected callbacks, custom events
+func (b *Browser) SmartClick(selector string, timeout time.Duration) error {
+	script := `
+		(selector) => {
+			const element = document.querySelector(selector);
+			if (!element) return { success: false, error: 'Element not found' };
+			
+			// Helper: auto-detect callable methods on element
+			function findCallableMethods(obj) {
+				const methods = [];
+				const patterns = ['_on', '_handle', 'handle', 'on', '_click', '_submit', '_action'];
+				for (const key of Object.keys(obj)) {
+					if (typeof obj[key] === 'function') {
+						for (const pattern of patterns) {
+							if (key.toLowerCase().startsWith(pattern.toLowerCase())) {
+								methods.push(key);
+								break;
+							}
+						}
+					}
+				}
+				return methods;
+			}
+			
+			// Method 1: Regular click
+			try {
+				element.click();
+				if (element.onclick || element.hasAttribute('onclick')) {
+					return { success: true, method: 'regular_click' };
+				}
+			} catch (e) {}
+			
+			// Method 2: Shadow DOM click - find button inside shadow root
+			if (element.shadowRoot) {
+				const innerBtn = element.shadowRoot.querySelector('button, [role="button"], .btn, [type="button"]');
+				if (innerBtn) {
+					try {
+						innerBtn.click();
+						return { success: true, method: 'shadow_dom_click' };
+					} catch (e) {}
+				}
+			}
+			
+			// Method 3: Auto-detect and call internal methods
+			const methods = findCallableMethods(element);
+			for (const method of methods) {
+				try {
+					element[method]();
+					return { success: true, method: 'auto_detected_' + method };
+				} catch (e) {}
+			}
+			
+			// Method 4: Check for internal button/light DOM
+			const innerBtn = element.querySelector('button, [role="button"], .btn');
+			if (innerBtn) {
+				try {
+					innerBtn.click();
+					return { success: true, method: 'inner_button_click' };
+				} catch (e) {}
+			}
+			
+			// Method 5: Dispatch custom events
+			const events = ['click', 'tap', 'action', 'submit'];
+			for (const event of events) {
+				try {
+					element.dispatchEvent(new CustomEvent(event, { bubbles: true, composed: true }));
+					element.dispatchEvent(new MouseEvent(event, { bubbles: true }));
+				} catch (e) {}
+			}
+			
+			// Method 6: Trigger framework click if detected
+			if (element.__vue__ || element._reactInternals) {
+				try {
+					element.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+					return { success: true, method: 'framework_click' };
+				} catch (e) {}
+			}
+			
+			return { success: true, method: 'all_methods_attempted', detected_methods: methods };
+		}
+	`
+	
+	result, err := b.page.Evaluate(script)
+	if err != nil {
+		return fmt.Errorf("smart click evaluation failed: %w", err)
+	}
+	
+	// Parse result
+	if resultMap, ok := result.(map[string]interface{}); ok {
+		if success, ok := resultMap["success"].(bool); ok && !success {
+			if errMsg, ok := resultMap["error"].(string); ok {
+				return fmt.Errorf("smart click failed: %s", errMsg)
+			}
+		}
+	}
+	
 	return nil
 }
 

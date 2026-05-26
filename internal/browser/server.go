@@ -43,6 +43,7 @@ type ServerConfig struct {
 	SocketPath string
 	MaxTabs    int
 	SessionID  string
+	Proxy      string
 }
 
 // Command represents a command sent to the server
@@ -69,18 +70,31 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 
 	// Launch browser
 	var browser playwright.Browser
+	var proxyServer *playwright.Proxy
+	if cfg.Proxy != "" {
+		proxyServer = &playwright.Proxy{Server: cfg.Proxy}
+	}
+	
 	switch cfg.Browser {
 	case "firefox":
 		browser, err = pw.Firefox.Launch(playwright.BrowserTypeLaunchOptions{
 			Headless: playwright.Bool(cfg.Headless),
+			Proxy:    proxyServer,
 		})
 	case "webkit":
 		browser, err = pw.WebKit.Launch(playwright.BrowserTypeLaunchOptions{
 			Headless: playwright.Bool(cfg.Headless),
+			Proxy:    proxyServer,
 		})
 	default:
 		browser, err = pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
 			Headless: playwright.Bool(cfg.Headless),
+			Proxy:    proxyServer,
+			Args: []string{
+				"--no-sandbox",
+				"--disable-extensions",
+				"--disable-default-apps",
+			},
 		})
 	}
 	if err != nil {
@@ -193,8 +207,8 @@ func (s *Server) Start() error {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
-	// Read command
-	buf := make([]byte, 4096)
+	// Read command with larger buffer
+	buf := make([]byte, 262144) // 256KB buffer for large JSON requests
 	n, err := conn.Read(buf)
 	if err != nil {
 		return
@@ -320,7 +334,241 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 	case "click":
 		selector := cmd.Params["selector"].(string)
 		page := s.tabs[s.activeTab]
-		err := page.Click(selector)
+		err := page.Click(selector, playwright.PageClickOptions{
+			Force: playwright.Bool(true),
+		})
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "click-js":
+		selector := cmd.Params["selector"].(string)
+		page := s.tabs[s.activeTab]
+		// Use JavaScript to click, bypassing Playwright's visibility checks
+		script := fmt.Sprintf(`
+			(function() {
+				const el = document.querySelector('%s');
+				if (el) {
+					el.click();
+					return 'clicked';
+				}
+				return 'not found';
+			})();
+		`, selector)
+		result, err := page.Evaluate(script)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"result": result}}
+
+	case "smart-click":
+		selector := cmd.Params["selector"].(string)
+		page := s.tabs[s.activeTab]
+		// Use SmartClick to handle Web Components
+		browser := &Browser{page: page}
+		err := browser.SmartClick(selector, 30*time.Second)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "pick":
+		x := cmd.Params["x"].(float64)
+		y := cmd.Params["y"].(float64)
+		depth := 5
+		if d, ok := cmd.Params["depth"].(float64); ok {
+			depth = int(d)
+		}
+		page := s.tabs[s.activeTab]
+		
+		pickScript := fmt.Sprintf(`
+			(function() {
+				const x = %f;
+				const y = %f;
+				const maxDepth = %d;
+				
+				const element = document.elementFromPoint(x, y);
+				if (!element) return { success: false, error: 'No element found at coordinates' };
+				
+				// Helper: generate CSS selector for an element
+				function generateSelector(el) {
+					if (el.id) return '#' + el.id;
+					if (el.tagName.includes('-')) return el.tagName.toLowerCase(); // Web Component
+					let selector = el.tagName.toLowerCase();
+					if (el.className && typeof el.className === 'string') {
+						const classes = el.className.split(' ').filter(c => c && c.length < 30);
+						if (classes.length > 0) selector += '.' + classes[0];
+					}
+					if (el.getAttribute('type')) selector += '[type="' + el.getAttribute('type') + '"]';
+					if (el.getAttribute('name')) selector += '[name="' + el.getAttribute('name') + '"]';
+					return selector;
+				}
+				
+				// Helper: detect callable methods on element
+				function detectMethods(obj) {
+					const methods = [];
+					const patterns = ['_on', '_handle', 'handle', 'on', '_click', '_submit', '_action'];
+					try {
+						for (const key of Object.keys(obj)) {
+							if (typeof obj[key] === 'function') {
+								for (const pattern of patterns) {
+									if (key.toLowerCase().startsWith(pattern.toLowerCase())) {
+										methods.push(key);
+										break;
+									}
+								}
+							}
+						}
+					} catch (e) {}
+					return methods;
+				}
+				
+				// Helper: get children summary (truncated)
+				function getChildrenSummary(el, maxItems = 5) {
+					const children = [];
+					for (let i = 0; i < Math.min(el.children.length, maxItems); i++) {
+						const child = el.children[i];
+						children.push(generateSelector(child));
+					}
+					if (el.children.length > maxItems) {
+						children.push('... (' + (el.children.length - maxItems) + ' more)');
+					}
+					return children;
+				}
+				
+				// Helper: get attributes
+				function getAttributes(el) {
+					const attrs = {};
+					for (const attr of el.attributes) {
+						if (attr.value.length < 100) {
+							attrs[attr.name] = attr.value;
+						} else {
+							attrs[attr.name] = attr.value.substring(0, 100) + '...';
+						}
+					}
+					return attrs;
+				}
+				
+				// Build target info
+				const target = {
+					tagName: element.tagName,
+					selector: generateSelector(element),
+					text: element.textContent ? element.textContent.substring(0, 50).trim() : '',
+					attributes: getAttributes(element),
+					methods: detectMethods(element),
+					rect: {
+						x: element.getBoundingClientRect().x,
+						y: element.getBoundingClientRect().y,
+						width: element.getBoundingClientRect().width,
+						height: element.getBoundingClientRect().height
+					}
+				};
+				
+				// Build ancestor chain
+				const ancestors = [];
+				let current = element.parentElement;
+				let level = 1;
+				while (current && level <= maxDepth) {
+					ancestors.push({
+						level: level,
+						tagName: current.tagName,
+						selector: generateSelector(current),
+						attributes: getAttributes(current),
+						methods: detectMethods(current),
+						children: getChildrenSummary(current)
+					});
+					current = current.parentElement;
+					level++;
+				}
+				
+				// Check for Shadow DOM
+				let shadowDOM = null;
+				if (element.shadowRoot) {
+					shadowDOM = {
+						host: generateSelector(element),
+						children: getChildrenSummary(element.shadowRoot)
+					};
+				}
+				
+				// Generate suggestions
+				const suggestions = [];
+				if (element.tagName.includes('-')) {
+					suggestions.push('Web Component detected: try smart-click or check methods');
+				}
+				if (target.methods.length > 0) {
+					suggestions.push('Callable methods found: ' + target.methods.join(', '));
+				}
+				if (shadowDOM) {
+					suggestions.push('Shadow DOM present: check shadowDOM.children for internal elements');
+				}
+				
+				return {
+					success: true,
+					target: target,
+					ancestors: ancestors,
+					shadowDOM: shadowDOM,
+					suggestions: suggestions
+				};
+			})();
+		`, x, y, depth)
+		
+		result, err := page.Evaluate(pickScript)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		// Convert result to map
+		if resultMap, ok := result.(map[string]interface{}); ok {
+			return Response{Success: true, Data: resultMap}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"result": result}}
+
+	case "hover":
+		selector := cmd.Params["selector"].(string)
+		page := s.tabs[s.activeTab]
+		
+		// First, get the element's position
+		posScript := fmt.Sprintf(`
+			(function() {
+				const el = document.querySelector('%s');
+				if (!el) return null;
+				const rect = el.getBoundingClientRect();
+				return {x: rect.x + rect.width/2, y: rect.y + rect.height/2};
+			})();
+		`, selector)
+		posResult, err := page.Evaluate(posScript)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		
+		// Show virtual cursor at the position
+		if posResult != nil {
+			// Convert posResult to JSON string for embedding in script
+			posJSON, _ := json.Marshal(posResult)
+			cursorScript := fmt.Sprintf(`
+				(function() {
+					// Remove existing cursor
+					const existing = document.getElementById('virtual-cursor');
+					if (existing) existing.remove();
+					
+					// Create new cursor
+					const cursor = document.createElement('div');
+					cursor.id = 'virtual-cursor';
+					cursor.style.cssText = 'position:fixed;width:20px;height:20px;background:red;border-radius:50%%;z-index:99999;pointer-events:none;transition:all 0.1s;';
+					const pos = %s;
+					cursor.style.left = pos.x + 'px';
+					cursor.style.top = pos.y + 'px';
+					document.body.appendChild(cursor);
+					return 'cursor shown';
+				})();
+			`, string(posJSON))
+			page.Evaluate(cursorScript)
+		}
+		
+		// Perform hover
+		err = page.Hover(selector, playwright.PageHoverOptions{
+			Force: playwright.Bool(true),
+		})
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
@@ -362,7 +610,8 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		}
 		page := s.tabs[s.activeTab]
 		_, err := page.Screenshot(playwright.PageScreenshotOptions{
-			Path: playwright.String(path),
+			Path:    playwright.String(path),
+			Timeout: playwright.Float(5000), // 5 seconds timeout
 		})
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
@@ -652,7 +901,7 @@ func (c *Client) SendCommand(cmd Command) (Response, error) {
 
 	conn.Write(data)
 
-	buf := make([]byte, 4096)
+	buf := make([]byte, 262144) // 256KB buffer for large JSON responses
 	n, err := conn.Read(buf)
 	if err != nil {
 		return Response{}, fmt.Errorf("Failed to read response: %w", err)
