@@ -5,7 +5,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/browser-cli/internal/browser"
 	"github.com/browser-cli/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -20,9 +19,6 @@ var (
 
 	// Version
 	version string
-
-	// Browser instance
-	browserInstance *browser.Browser
 
 	// Output formatter
 	formatter *output.Formatter
@@ -43,49 +39,32 @@ var rootCmd = &cobra.Command{
 	Short: "Browser automation CLI for AI agents",
 	Long: `Browser-CLI is a command-line tool for browser automation, designed specifically for AI agents.
 
-It provides a clean CLI interface for all common browser operations with structured output
-(JSON or Markdown) that is easy for AI models to parse and understand.
+The browser server is automatically started when needed and kept running across commands.
+Use --session to isolate multiple agents with independent browser instances.
 
 KEY FEATURES:
-  • Navigate, click, fill forms, take screenshots
-  • Extract page text and find elements
-  • Execute JavaScript in browser context
-  • Continuous operations with 'run' command (recommended for AI)
-  • JSON output for programmatic parsing
+  • Auto-managed browser server (no manual start/stop needed)
+  • Multi-session support for parallel agent execution
+  • Cookie persistence for login state
+  • Dialog detection and handling
+  • JSON output for AI parsing
 
-RECOMMENDED USAGE FOR AI:
-  Use the 'run' command with JSON output for multi-step operations:
-  
-    browser-cli --output json run "navigate https://example.com; elements a; text"
+USAGE:
+  browser-cli navigate https://example.com    # Auto-starts server, navigates
+  browser-cli click "button.submit"           # Uses existing server
+  browser-cli screenshot page.png             # Takes screenshot
+  browser-cli stop                            # Stops server
 
-  This keeps the browser alive across all operations and returns structured results.
+MULTI-AGENT:
+  browser-cli --session agent-1 navigate https://site1.com
+  browser-cli --session agent-2 navigate https://site2.com
 
-BROWSER SUPPORT:
-  • chromium (default) - Best compatibility
-  • firefox - Alternative browser
-  • webkit - Safari-like engine
-
-EXAMPLES:
-  # Single operation
-  browser-cli navigate https://example.com
-  
-  # Continuous operations (recommended)
-  browser-cli run "navigate https://example.com; click a; text"
-  
-  # JSON output for AI parsing
-  browser-cli --output json run "navigate https://example.com; elements 'a[href]'"
-  
-  # Use Firefox browser
-  browser-cli --browser firefox navigate https://example.com`,
+OUTPUT:
+  browser-cli --output json navigate https://example.com
+`,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// Initialize formatter
 		formatter = output.NewFormatter(output.Format(outputFmt))
-	},
-	PersistentPostRun: func(cmd *cobra.Command, args []string) {
-		// Cleanup browser
-		if browserInstance != nil {
-			browserInstance.Close()
-		}
 	},
 }
 
@@ -99,24 +78,5 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "markdown", 
 		"Output format: json (recommended for AI), markdown (human-readable)")
 	rootCmd.PersistentFlags().StringVarP(&sessionID, "session", "s", "", 
-		"Session ID for persistent browser (not implemented yet)")
-}
-
-// getBrowser returns or creates browser instance
-func getBrowser() (*browser.Browser, error) {
-	if browserInstance != nil {
-		return browserInstance, nil
-	}
-
-	var err error
-	browserInstance, err = browser.New(browser.Config{
-		Browser:  browserType,
-		Headless: headless,
-		Timeout:  timeout,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create browser: %w", err)
-	}
-
-	return browserInstance, nil
+		"Session ID for isolated browser instance")
 }

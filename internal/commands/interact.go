@@ -9,8 +9,7 @@ var clickCmd = &cobra.Command{
 	Short: "Click an element on the page",
 	Long: `Click on an element identified by a CSS selector.
 
-This command finds an element and performs a click action, similar to a user
-clicking with their mouse.
+The browser server is auto-started if not running.
 
 ARGUMENTS:
   selector - CSS selector to identify the element (e.g. "#button", ".submit", "a[href]")
@@ -19,34 +18,15 @@ SELECTOR EXAMPLES:
   • "#submit"           - Element with id="submit"
   • ".btn-primary"      - Elements with class "btn-primary"
   • "button[type=submit]" - Submit buttons
-  • "a[href='/login']"  - Link with specific href
-  • "div > p:first-child" - First paragraph in a div
+  • "text=Login"        - Element containing text "Login"
 
 EXAMPLES:
-  browser-cli run "navigate https://example.com; click '#submit-button'"
-  browser-cli run "navigate https://google.com; click 'input[type=submit]'"
-
-NOTE:
-  For single commands, the browser closes after execution.
-  Use 'run' command for continuous operations.`,
-	Args:  cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		selector := args[0]
-
-		b, err := getBrowser()
-		if err != nil {
-			printError("click", err)
-			return
-		}
-
-		if err := b.Click(selector, timeout); err != nil {
-			printError("click", err)
-			return
-		}
-
-		printSuccess("click", map[string]interface{}{
-			"selector": selector,
-		})
+  browser-cli click "#submit-button"
+  browser-cli click "text=Login"
+  browser-cli click "button.submit"`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return sendCommand("click", map[string]interface{}{"selector": args[0]})
 	},
 }
 
@@ -55,49 +35,21 @@ var fillCmd = &cobra.Command{
 	Short: "Fill an input field with a value",
 	Long: `Fill an input field with a specified value.
 
-This command clears the input field and sets the value, similar to a user
-typing into a form field.
+The browser server is auto-started if not running.
 
 ARGUMENTS:
   selector - CSS selector for the input element
   value    - The value to fill (use quotes for values with spaces)
 
-SELECTOR EXAMPLES:
-  • "#email"            - Input with id="email"
-  • "input[name=user]"  - Input with name attribute
-  • ".search-box"       - Input with class "search-box"
-  • "textarea"          - Any textarea element
-
-VALUE EXAMPLES:
-  • 'hello'             - Simple value
-  • 'hello world'       - Quoted value with spaces
-  • "user@example.com"  - Email address
-
 EXAMPLES:
-  browser-cli run "navigate https://login.com; fill '#email' 'user@test.com'; fill '#password' 'secret'"
-  browser-cli run "navigate https://google.com; fill '#search' 'hello world'"
-
-NOTE:
-  Use single or double quotes for values containing spaces.`,
-	Args:  cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
-		selector := args[0]
-		value := args[1]
-
-		b, err := getBrowser()
-		if err != nil {
-			printError("fill", err)
-			return
-		}
-
-		if err := b.Fill(selector, value, timeout); err != nil {
-			printError("fill", err)
-			return
-		}
-
-		printSuccess("fill", map[string]interface{}{
-			"selector": selector,
-			"value":    value,
+  browser-cli fill "#email" "user@test.com"
+  browser-cli fill "input[name=user]" "john"
+  browser-cli fill "#password" "secret123"`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return sendCommand("fill", map[string]interface{}{
+			"selector": args[0],
+			"value":    args[1],
 		})
 	},
 }
@@ -107,38 +59,20 @@ var selectCmd = &cobra.Command{
 	Short: "Select an option from a dropdown",
 	Long: `Select an option from a dropdown/select element.
 
-This command selects an option from a <select> dropdown element by its value.
+The browser server is auto-started if not running.
 
 ARGUMENTS:
   selector - CSS selector for the select element
   value    - The value of the option to select
 
 EXAMPLES:
-  browser-cli run "navigate https://form.com; select '#country' 'US'"
-  browser-cli run "navigate https://settings.com; select '.language' 'en'"
-
-NOTE:
-  The value must match one of the option values in the dropdown,
-  not the visible text of the option.`,
-	Args:  cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
-		selector := args[0]
-		value := args[1]
-
-		b, err := getBrowser()
-		if err != nil {
-			printError("select", err)
-			return
-		}
-
-		if err := b.Select(selector, value, timeout); err != nil {
-			printError("select", err)
-			return
-		}
-
-		printSuccess("select", map[string]interface{}{
-			"selector": selector,
-			"value":    value,
+  browser-cli select "#country" "US"
+  browser-cli select ".language" "en"`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return sendCommand("select", map[string]interface{}{
+			"selector": args[0],
+			"value":    args[1],
 		})
 	},
 }
@@ -148,11 +82,8 @@ var typeCmd = &cobra.Command{
 	Short: "Type text into an element character by character",
 	Long: `Type text into an element with realistic keystroke delays.
 
-Unlike 'fill' which sets the value directly, 'type' simulates actual typing
-with delays between keystrokes. This is useful for:
-  • Inputs that react to keystroke events
-  • Search boxes with autocomplete
-  • Testing keyboard interactions
+Unlike 'fill' which sets the value directly, 'type' simulates actual typing.
+The browser server is auto-started if not running.
 
 ARGUMENTS:
   selector - CSS selector for the element
@@ -162,28 +93,15 @@ FLAGS:
   --delay  - Delay between keystrokes in milliseconds (default: 50)
 
 EXAMPLES:
-  browser-cli run "navigate https://google.com; type '#search' 'hello world'"
-  browser-cli run "navigate https://chat.com; type '#message' 'Hello!' --delay 100"`,
-	Args:  cobra.ExactArgs(2),
-	Run: func(cmd *cobra.Command, args []string) {
-		selector := args[0]
-		text := args[1]
-
-		b, err := getBrowser()
-		if err != nil {
-			printError("type", err)
-			return
-		}
-
+  browser-cli type "#search" "hello world"
+  browser-cli type "#message" "Hello!" --delay 100`,
+	Args: cobra.ExactArgs(2),
+	RunE: func(cmd *cobra.Command, args []string) error {
 		delay, _ := cmd.Flags().GetInt("delay")
-		if err := b.Type(selector, text, delay, timeout); err != nil {
-			printError("type", err)
-			return
-		}
-
-		printSuccess("type", map[string]interface{}{
-			"selector": selector,
-			"text":     text,
+		return sendCommand("type", map[string]interface{}{
+			"selector": args[0],
+			"text":     args[1],
+			"delay":    delay,
 		})
 	},
 }

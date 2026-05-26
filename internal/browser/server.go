@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -218,6 +219,11 @@ func (s *Server) executeCommand(cmd Command) Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.executeCommandInternal(cmd)
+}
+
+// executeCommandInternal executes without locking (called from executeCommand or run)
+func (s *Server) executeCommandInternal(cmd Command) Response {
 	switch cmd.Action {
 	case "ping":
 		return Response{Success: true, Data: map[string]interface{}{"status": "ok"}}
@@ -429,9 +435,134 @@ func (s *Server) executeCommand(cmd Command) Response {
 			return Response{Success: false, Error: "Dialog event not received"}
 		}
 
+	case "scroll":
+		direction := cmd.Params["direction"].(string)
+		distance := 300.0
+		if d, ok := cmd.Params["distance"].(float64); ok {
+			distance = d
+		}
+		page := s.tabs[s.activeTab]
+		if direction == "up" {
+			distance = -distance
+		}
+		page.Evaluate(fmt.Sprintf("window.scrollBy(0, %f)", distance))
+		return Response{Success: true}
+
+	case "back":
+		page := s.tabs[s.activeTab]
+		_, err := page.GoBack()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "forward":
+		page := s.tabs[s.activeTab]
+		_, err := page.GoForward()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "reload":
+		page := s.tabs[s.activeTab]
+		_, err := page.Reload()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "select":
+		selector := cmd.Params["selector"].(string)
+		value := cmd.Params["value"].(string)
+		page := s.tabs[s.activeTab]
+		_, err := page.SelectOption(selector, playwright.SelectOptionValues{
+			Values: &[]string{value},
+		})
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "elements":
+		selector := cmd.Params["selector"].(string)
+		page := s.tabs[s.activeTab]
+		elements, err := page.QuerySelectorAll(selector)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		var items []map[string]interface{}
+		for _, el := range elements {
+			tag, _ := el.Evaluate("el => el.tagName")
+			text, _ := el.Evaluate("el => el.textContent")
+			id, _ := el.Evaluate("el => el.id")
+			class, _ := el.Evaluate("el => el.className")
+			href, _ := el.Evaluate("el => el.href")
+			visible, _ := el.IsVisible()
+			items = append(items, map[string]interface{}{
+				"tag":     tag,
+				"text":    text,
+				"id":      id,
+				"class":   class,
+				"href":    href,
+				"visible": visible,
+			})
+		}
+		return Response{Success: true, Data: map[string]interface{}{
+			"count": len(items),
+			"items": items,
+		}}
+
+	case "run":
+		// Execute multiple actions in sequence
+		actions, ok := cmd.Params["actions"].([]interface{})
+		if !ok {
+			return Response{Success: false, Error: "run requires actions array"}
+		}
+		results := make([]map[string]interface{}, 0)
+		for i, actionInterface := range actions {
+			actionMap, ok := actionInterface.(map[string]interface{})
+			if !ok {
+				results = append(results, map[string]interface{}{
+					"step":   i + 1,
+					"status": "error",
+					"error":  "invalid action format",
+				})
+				continue
+			}
+			// Create sub-command
+			subCmd := Command{
+				Action: actionMap["action"].(string),
+				Params: actionMap["params"].(map[string]interface{}),
+			}
+			// Execute without locking (already locked)
+			resp := s.executeCommandInternal(subCmd)
+			result := map[string]interface{}{
+				"step":   i + 1,
+				"action": subCmd.Action,
+				"status": "success",
+			}
+			if resp.Success && resp.Data != nil {
+				result["data"] = resp.Data
+			}
+			if !resp.Success {
+				result["status"] = "error"
+				result["error"] = resp.Error
+			}
+			results = append(results, result)
+		}
+		return Response{Success: true, Data: map[string]interface{}{
+			"total_steps": len(results),
+			"results":     results,
+		}}
+
 	case "stop":
 		s.running = false
-		s.Stop()
+		// Stop will be called after response is sent
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			s.Stop()
+		}()
 		return Response{Success: true, Data: map[string]interface{}{"message": "Server stopped"}}
 
 	default:

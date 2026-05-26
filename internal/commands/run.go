@@ -5,19 +5,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/browser-cli/internal/browser"
 	"github.com/spf13/cobra"
 )
 
 var runCmd = &cobra.Command{
 	Use:   "run <actions>",
 	Short: "Execute multiple browser actions in a single session",
-	Long: `Execute multiple browser actions sequentially in a single browser session.
+	Long: `Execute multiple browser actions sequentially.
 
-This is the RECOMMENDED way for AI agents to interact with the browser, because:
-  1. The browser stays alive across all operations
-  2. You can navigate, interact, and extract data in one call
-  3. Results are returned as a structured array
+The browser server is auto-started if not running.
 
 ACTION SYNTAX:
   Actions are separated by semicolons (;). Each action is a command with arguments.
@@ -39,61 +35,26 @@ SUPPORTED ACTIONS:
   sleep <duration>        - Sleep for manual operations (e.g., 30s, 1m)
   back / forward / reload - Navigation controls
 
-SELECTOR SYNTAX:
-  Use standard CSS selectors:
-  • "#id"          - Element by ID
-  • ".class"       - Elements by class
-  • "tag"          - Elements by tag name
-  • "[attr=val]"   - Elements by attribute
-  • "a[href]"      - All links
-  • "input[type=text]" - Text inputs
-
-QUOTED VALUES:
-  For values with spaces, use single or double quotes:
-  fill '#search' 'hello world'
-  fill "#search" "hello world"
-
 EXAMPLES:
-  # Basic navigation and extraction
   browser-cli run "navigate https://example.com; text; screenshot"
-  
-  # Form interaction
-  browser-cli run "navigate https://login.example.com; fill '#email' 'user@test.com'; fill '#password' 'secret'; click '#submit'"
-  
-  # Click link and extract new page
-  browser-cli run "navigate https://example.com; click 'a[href]'; wait 'body'; text"
-  
-  # Get structured JSON output (recommended for AI)
-  browser-cli --output json run "navigate https://example.com; elements a; eval document.title"
-
-OUTPUT:
-  Returns an array of results, one for each action:
-  • Each result has: step, action, status (success/error)
-  • Successful results include action-specific data
-  • Failed results include error message
-  • Use --output json for structured parsing`,
+  browser-cli run "navigate https://login.com; fill '#email' 'user@test.com'; click '#submit'"
+  browser-cli --output json run "navigate https://example.com; elements a"`,
 	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		actionsStr := args[0]
 		actions := parseActions(actionsStr)
 
-		b, err := getBrowser()
-		if err != nil {
-			printError("run", err)
-			return
+		// Convert to server format
+		actionList := make([]map[string]interface{}, 0)
+		for _, action := range actions {
+			parsed := parseActionToMap(action)
+			if parsed != nil {
+				actionList = append(actionList, parsed)
+			}
 		}
 
-		results := make([]map[string]interface{}, 0)
-
-		for i, action := range actions {
-			result := executeAction(b, action)
-			result["step"] = i + 1
-			results = append(results, result)
-		}
-
-		printSuccess("run", map[string]interface{}{
-			"total_steps": len(results),
-			"results":     results,
+		return sendCommand("run", map[string]interface{}{
+			"actions": actionList,
 		})
 	},
 }
@@ -101,15 +62,14 @@ OUTPUT:
 func parseActions(s string) []string {
 	// Smart split: don't split semicolons inside eval command
 	actions := make([]string, 0)
-	
+
 	// Find eval commands and protect their content
 	evalStart := strings.Index(s, "eval ")
 	if evalStart != -1 {
 		// Find the end of eval (next semicolon outside of quotes, or end of string)
 		evalContent := s[evalStart:]
-		// Find where eval ends - look for unquoted semicolon or end
 		evalEnd := findEvalEnd(evalContent)
-		
+
 		// Split before eval
 		beforeEval := s[:evalStart]
 		if beforeEval != "" {
@@ -121,13 +81,13 @@ func parseActions(s string) []string {
 				}
 			}
 		}
-		
+
 		// Add eval as single action
 		evalAction := strings.TrimSpace(evalContent[:evalEnd])
 		if evalAction != "" {
 			actions = append(actions, evalAction)
 		}
-		
+
 		// Split after eval
 		if evalEnd < len(evalContent) {
 			afterEval := evalContent[evalEnd+1:]
@@ -149,16 +109,15 @@ func parseActions(s string) []string {
 			}
 		}
 	}
-	
+
 	return actions
 }
 
 // findEvalEnd finds the end of eval command content
 func findEvalEnd(s string) int {
-	// eval content ends at next unquoted semicolon or end of string
 	inSingleQuote := false
 	inDoubleQuote := false
-	
+
 	for i, c := range s {
 		if c == '\'' && !inDoubleQuote {
 			inSingleQuote = !inSingleQuote
@@ -171,14 +130,10 @@ func findEvalEnd(s string) int {
 	return len(s)
 }
 
-func executeAction(b *browser.Browser, action string) map[string]interface{} {
+func parseActionToMap(action string) map[string]interface{} {
 	parts := strings.Fields(action)
 	if len(parts) == 0 {
-		return map[string]interface{}{
-			"action": "",
-			"status": "error",
-			"error":  "empty action",
-		}
+		return nil
 	}
 
 	cmdName := parts[0]
@@ -188,144 +143,117 @@ func executeAction(b *browser.Browser, action string) map[string]interface{} {
 	args = parseQuotedArgs(args)
 
 	result := map[string]interface{}{
-		"action": action,
-		"status": "success",
+		"action": cmdName,
+		"params": map[string]interface{}{},
 	}
+
+	params := result["params"].(map[string]interface{})
 
 	switch cmdName {
 	case "navigate":
 		if len(args) < 1 {
-			result["status"] = "error"
-			result["error"] = "navigate requires URL"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "navigate requires URL",
+			}
 		}
-		r, err := b.Navigate(args[0], timeout)
-		if err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		} else {
-			result["url"] = r.URL
-			result["title"] = r.Title
-		}
+		params["url"] = args[0]
 
 	case "click":
 		if len(args) < 1 {
-			result["status"] = "error"
-			result["error"] = "click requires selector"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "click requires selector",
+			}
 		}
-		if err := b.Click(args[0], timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
+		params["selector"] = args[0]
 
 	case "fill":
 		if len(args) < 2 {
-			result["status"] = "error"
-			result["error"] = "fill requires selector and value"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "fill requires selector and value",
+			}
 		}
-		if err := b.Fill(args[0], args[1], timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
+		params["selector"] = args[0]
+		params["value"] = args[1]
 
 	case "type":
 		if len(args) < 2 {
-			result["status"] = "error"
-			result["error"] = "type requires selector and text"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "type requires selector and text",
+			}
 		}
-		if err := b.Type(args[0], args[1], 50, timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
+		params["selector"] = args[0]
+		params["text"] = args[1]
+		params["delay"] = 50
 
 	case "select":
 		if len(args) < 2 {
-			result["status"] = "error"
-			result["error"] = "select requires selector and value"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "select requires selector and value",
+			}
 		}
-		if err := b.Select(args[0], args[1], timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
+		params["selector"] = args[0]
+		params["value"] = args[1]
 
 	case "screenshot":
 		path := "screenshot.png"
 		if len(args) > 0 {
 			path = args[0]
 		}
-		r, err := b.Screenshot(path)
-		if err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		} else {
-			result["path"] = r.Path
-		}
+		params["path"] = path
 
 	case "text":
-		r, err := b.Text()
-		if err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		} else {
-			result["content"] = r.Text
-		}
+		// No params needed
 
 	case "elements":
 		if len(args) < 1 {
-			result["status"] = "error"
-			result["error"] = "elements requires selector"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "elements requires selector",
+			}
 		}
-		els, err := b.Elements(args[0])
-		if err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		} else {
-			result["count"] = len(els)
-			result["items"] = els
-		}
+		params["selector"] = args[0]
 
 	case "eval":
 		if len(args) < 1 {
-			result["status"] = "error"
-			result["error"] = "eval requires JavaScript"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "eval requires JavaScript",
+			}
 		}
-		r, err := b.Eval(strings.Join(args, " "))
-		if err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		} else {
-			result["value"] = r.Value
-		}
+		params["script"] = strings.Join(args, " ")
 
 	case "wait":
 		if len(args) < 1 {
-			result["status"] = "error"
-			result["error"] = "wait requires selector"
-			return result
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "wait requires selector",
+			}
 		}
-		if err := b.Wait(args[0], timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
+		params["selector"] = args[0]
 
 	case "scroll":
 		direction := "down"
 		if len(args) > 0 {
 			direction = args[0]
 		}
-		if err := b.Scroll(direction, 300); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
+		params["direction"] = direction
+		params["distance"] = 300
 
 	case "sleep":
-		// Sleep for manual operations (e.g., waiting for user to login)
+		// Sleep is handled client-side, not sent to server
 		duration := 30 * time.Second
 		if len(args) > 0 {
 			if d, err := time.ParseDuration(args[0]); err == nil {
@@ -333,29 +261,17 @@ func executeAction(b *browser.Browser, action string) map[string]interface{} {
 			}
 		}
 		time.Sleep(duration)
-		result["duration"] = duration.String()
+		return nil // Skip sending to server
 
-	case "back":
-		if err := b.Back(timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
-
-	case "forward":
-		if err := b.Forward(timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
-
-	case "reload":
-		if err := b.Reload(timeout); err != nil {
-			result["status"] = "error"
-			result["error"] = err.Error()
-		}
+	case "back", "forward", "reload":
+		// No params needed
 
 	default:
-		result["status"] = "error"
-		result["error"] = fmt.Sprintf("unknown action: %s", cmdName)
+		return map[string]interface{}{
+			"action": cmdName,
+			"params": map[string]interface{}{},
+			"error":  fmt.Sprintf("unknown action: %s", cmdName),
+		}
 	}
 
 	return result
@@ -368,7 +284,6 @@ func parseQuotedArgs(args []string) []string {
 	for i < len(args) {
 		arg := args[i]
 		if strings.HasPrefix(arg, "'") || strings.HasPrefix(arg, "\"") {
-			// Find closing quote
 			quote := arg[0]
 			combined := arg[1:]
 			i++
@@ -380,7 +295,6 @@ func parseQuotedArgs(args []string) []string {
 				combined += " " + strings.TrimSuffix(args[i], string(quote))
 				i++
 			} else {
-				// Handle case where the same arg has both opening and closing quote
 				combined = strings.TrimSuffix(combined, string(quote))
 			}
 			result = append(result, combined)
