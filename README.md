@@ -63,7 +63,8 @@ browser-cli run "navigate https://example.com; click a; text"
 --headless        Headless mode (default: true)
 --timeout, -t     Timeout duration (default: 30s)
 --output, -o      Output format: json, markdown (default: markdown)
---session, -s     Session ID for isolated browser instance
+--session, -s     Session ID for isolated browser instance (required)
+--proxy           Proxy server URL (e.g. http://proxy.example.com:8080 or socks5://proxy:1080)
 ```
 
 ### Navigation Commands
@@ -80,10 +81,60 @@ browser-cli run "navigate https://example.com; click a; text"
 | Command | Description |
 |---------|-------------|
 | `click <selector>` | Click element |
+| `click-js <selector>` | Click using JavaScript (bypasses visibility checks) |
+| `smart-click <selector>` | Intelligently click Web Components (auto-detects internal methods) |
+| `hover <selector>` | Hover over element (shows virtual cursor) |
 | `fill <selector> <value>` | Fill input field |
 | `type <selector> <text>` | Type text character by character |
 | `select <selector> <value>` | Select dropdown option |
 | `eval <script>` | Execute JavaScript |
+| `pick <x> <y> [--depth=N]` | Pick element at coordinates, return DOM hierarchy and methods |
+
+### Web Component Support
+
+Browser-CLI provides special commands for handling Web Components (custom elements):
+
+#### `smart-click` - Auto-detect and click Web Components
+
+Web Components often use internal callback functions instead of standard DOM events. `smart-click` automatically detects and calls these methods:
+
+```bash
+# Works with custom elements like <custom-button>, <xhs-publish-btn>
+browser-cli smart-click "custom-button"
+browser-cli smart-click "[data-action=publish]"
+```
+
+Detection patterns: `_on*`, `_handle*`, `handle*`, `_click`, `_submit`, `_action`
+
+#### `pick` - Discover element internals
+
+Use `pick` to inspect elements at specific coordinates and discover their internal structure:
+
+```bash
+# Pick element at coordinates (from screenshot)
+browser-cli pick 500 300 --depth=5
+
+# Returns:
+{
+  "target": {
+    "tagName": "CUSTOM-BUTTON",
+    "selector": "custom-button",
+    "methods": ["_onClick", "_onPublish"],  // Detected callable methods!
+    "attributes": {"data-action": "publish"}
+  },
+  "ancestors": [
+    {"level": 1, "tagName": "DIV", "selector": ".toolbar", "children": ["custom-button", "save-btn"]}
+  ],
+  "shadowDOM": {"host": "custom-button", "children": ["button.internal"]},
+  "suggestions": ["Web Component detected: try smart-click"]
+}
+```
+
+Use cases:
+- Discover internal methods like `_onPublish` on Web Components
+- Find correct selector for nested elements
+- Understand Shadow DOM structure
+- Debug why `click()` doesn't work on custom elements
 
 ### Extraction Commands
 
