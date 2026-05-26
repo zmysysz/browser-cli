@@ -29,6 +29,8 @@ var backCmd = &cobra.Command{
 	Short: "Navigate back in browser history",
 	Long: `Navigate to the previous page in browser history.
 
+The browser server is auto-started if not running.
+
 EXAMPLES:
   browser-cli back`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -41,6 +43,8 @@ var forwardCmd = &cobra.Command{
 	Short: "Navigate forward in browser history",
 	Long: `Navigate to the next page in browser history.
 
+The browser server is auto-started if not running.
+
 EXAMPLES:
   browser-cli forward`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -52,6 +56,8 @@ var reloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Reload the current page",
 	Long: `Reload (refresh) the current page.
+
+The browser server is auto-started if not running.
 
 EXAMPLES:
   browser-cli reload`,

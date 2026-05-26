@@ -78,7 +78,15 @@ var serverStartCmd = &cobra.Command{
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Check browser server status",
-	RunE:  runStatus,
+	Long: `Check if the browser server is running and get its status.
+
+OUTPUT:
+  Returns server status: running, active_tab, tabs count
+
+EXAMPLES:
+  browser-cli status
+  browser-cli --session agent-1 status`,
+	RunE: runStatus,
 }
 
 // stopCmd stops the server
@@ -87,7 +95,11 @@ var stopCmd = &cobra.Command{
 	Short: "Stop the browser server",
 	Long: `Stop the browser server and save cookies.
 
-The server will be auto-started again when needed.`,
+The server will be auto-started again when needed.
+
+EXAMPLES:
+  browser-cli stop
+  browser-cli --session agent-1 stop`,
 	RunE: runStop,
 }
 
@@ -95,7 +107,14 @@ The server will be auto-started again when needed.`,
 var sessionListCmd = &cobra.Command{
 	Use:   "session-list",
 	Short: "List all active browser sessions",
-	RunE:  runSessionList,
+	Long: `List all active browser sessions.
+
+OUTPUT:
+  Returns a list of session IDs
+
+EXAMPLES:
+  browser-cli session-list`,
+	RunE: runSessionList,
 }
 
 // Tab commands
@@ -103,7 +122,14 @@ var sessionListCmd = &cobra.Command{
 var tabNewCmd = &cobra.Command{
 	Use:   "tab-new",
 	Short: "Create new tab",
-	Args:  cobra.NoArgs,
+	Long: `Create a new browser tab and switch to it.
+
+The browser server is auto-started if not running.
+
+EXAMPLES:
+  browser-cli tab-new
+  browser-cli --output json tab-new`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return sendCommand("tab_new", nil)
 	},
@@ -112,7 +138,17 @@ var tabNewCmd = &cobra.Command{
 var tabSwitchCmd = &cobra.Command{
 	Use:   "tab-switch <id>",
 	Short: "Switch to tab",
-	Args:  cobra.ExactArgs(1),
+	Long: `Switch to a specific browser tab by its ID.
+
+The browser server is auto-started if not running.
+
+ARGUMENTS:
+  id - Tab ID to switch to (use tab-list to see available IDs)
+
+EXAMPLES:
+  browser-cli tab-switch 2
+  browser-cli tab-switch 3`,
+	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var tabID int
 		fmt.Sscanf(args[0], "%d", &tabID)
@@ -123,7 +159,17 @@ var tabSwitchCmd = &cobra.Command{
 var tabListCmd = &cobra.Command{
 	Use:   "tab-list",
 	Short: "List all tabs",
-	Args:  cobra.NoArgs,
+	Long: `List all open tabs in the current browser session.
+
+The browser server is auto-started if not running.
+
+OUTPUT:
+  Returns a list of tabs with their IDs and titles.
+
+EXAMPLES:
+  browser-cli tab-list
+  browser-cli --output json tab-list`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return sendCommand("tab_list", nil)
 	},
@@ -132,7 +178,17 @@ var tabListCmd = &cobra.Command{
 var tabCloseCmd = &cobra.Command{
 	Use:   "tab-close [id]",
 	Short: "Close tab",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Close a browser tab by its ID.
+
+The browser server is auto-started if not running.
+
+ARGUMENTS:
+  id - Optional tab ID to close (default: current active tab)
+
+EXAMPLES:
+  browser-cli tab-close        # Close current tab
+  browser-cli tab-close 2      # Close tab with ID 2`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		tabID := 0
 		if len(args) > 0 {
@@ -147,7 +203,17 @@ var tabCloseCmd = &cobra.Command{
 var dialogStatusCmd = &cobra.Command{
 	Use:   "dialog-status",
 	Short: "Check pending dialog",
-	Args:  cobra.NoArgs,
+	Long: `Check if there is a pending JavaScript dialog (alert, confirm, prompt, beforeunload).
+
+The browser server is auto-started if not running.
+
+OUTPUT:
+  Returns dialog info if pending: type, message, default_value
+
+EXAMPLES:
+  browser-cli dialog-status
+  browser-cli --output json dialog-status`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return sendCommand("dialog_status", nil)
 	},
@@ -156,7 +222,17 @@ var dialogStatusCmd = &cobra.Command{
 var dialogAcceptCmd = &cobra.Command{
 	Use:   "dialog-accept [value]",
 	Short: "Accept dialog",
-	Args:  cobra.MaximumNArgs(1),
+	Long: `Accept a pending JavaScript dialog.
+
+The browser server is auto-started if not running.
+
+ARGUMENTS:
+  value - Optional value for prompt dialogs
+
+EXAMPLES:
+  browser-cli dialog-accept           # Accept alert/confirm
+  browser-cli dialog-accept "input"   # Accept prompt with value`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		value := ""
 		if len(args) > 0 {
@@ -169,7 +245,13 @@ var dialogAcceptCmd = &cobra.Command{
 var dialogDismissCmd = &cobra.Command{
 	Use:   "dialog-dismiss",
 	Short: "Dismiss dialog",
-	Args:  cobra.NoArgs,
+	Long: `Dismiss (cancel) a pending JavaScript dialog.
+
+The browser server is auto-started if not running.
+
+EXAMPLES:
+  browser-cli dialog-dismiss`,
+	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return sendCommand("dialog_dismiss", nil)
 	},
