@@ -32,6 +32,11 @@ SUPPORTED ACTIONS:
   eval <javascript>       - Execute JavaScript
   wait <selector>         - Wait for element to appear
   scroll <direction>      - Scroll page (up or down)
+  upload <selector> <file> - Upload file to input
+  pdf [file]              - Save page as PDF (Chromium only)
+  keyboard <key>          - Press keyboard key/combo (e.g., Ctrl+A)
+  right-click <selector>  - Right-click element
+  dblclick <selector>     - Double-click element
   sleep <duration>        - Sleep for manual operations (e.g., 30s, 1m)
   back / forward / reload - Navigation controls
 
@@ -251,6 +256,56 @@ func parseActionToMap(action string) map[string]interface{} {
 		}
 		params["direction"] = direction
 		params["distance"] = 300
+
+	case "upload":
+		if len(args) < 2 {
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "upload requires selector and file path",
+			}
+		}
+		params["selector"] = args[0]
+		params["path"] = args[1]
+
+	case "pdf":
+		path := "output.pdf"
+		if len(args) > 0 {
+			path = args[0]
+		}
+		params["path"] = path
+		params["landscape"] = false
+		params["format"] = "A4"
+
+	case "keyboard":
+		if len(args) < 1 {
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "keyboard requires key",
+			}
+		}
+		params["key"] = args[0]
+
+	case "right-click":
+		if len(args) < 1 {
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "right-click requires selector",
+			}
+		}
+		params["selector"] = args[0]
+
+	case "dblclick":
+		if len(args) < 1 {
+			return map[string]interface{}{
+				"action": cmdName,
+				"params": map[string]interface{}{},
+				"error":  "dblclick requires selector",
+			}
+		}
+		params["selector"] = args[0]
 
 	case "sleep":
 		// Sleep is handled client-side, not sent to server

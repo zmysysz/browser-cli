@@ -20,37 +20,51 @@ type DialogInfo struct {
 	TabID        int    `json:"tab_id"`        // Which tab has the dialog
 }
 
-// Server manages a persistent browser instance
+// SessionState holds per-session browser state (one BrowserContext per session)
+type SessionState struct {
+	ID            string
+	Context       playwright.BrowserContext
+	Tabs          map[int]playwright.Page
+	ActiveTab     int
+	NextTabID     int
+	PendingDialog *DialogInfo
+	DialogChan    chan playwright.Dialog
+}
+
+// Server manages a single browser instance with multiple session contexts
 type Server struct {
 	mu           sync.Mutex
 	pw           *playwright.Playwright
 	browser      playwright.Browser
-	context      playwright.BrowserContext
-	tabs         map[int]playwright.Page
-	activeTab    int
-	nextTabID    int
+	sessions     map[string]*SessionState // sessionID -> SessionState
 	listener     net.Listener
 	socketPath   string
 	running      bool
-	pendingDialog *DialogInfo          // Current pending dialog
-	dialogChan   chan playwright.Dialog // Channel for dialog events
+	lastActivity time.Time
+	idleTimeout  time.Duration
+	stopOnce     sync.Once
+
+	// Browser config (shared across all sessions)
+	browserType string
+	headless    bool
+	proxy       string
 }
 
 // ServerConfig holds server configuration
 type ServerConfig struct {
-	Browser    string
-	Headless   bool
-	SocketPath string
-	MaxTabs    int
-	SessionID  string
-	Proxy      string
+	Browser     string
+	Headless    bool
+	SocketPath  string
+	Proxy       string
+	IdleTimeout time.Duration
 }
 
 // Command represents a command sent to the server
 type Command struct {
-	Action   string                 `json:"action"`
-	TabID    int                    `json:"tab_id,omitempty"`
-	Params   map[string]interface{} `json:"params,omitempty"`
+	Action    string                 `json:"action"`
+	SessionID string                 `json:"session_id,omitempty"`
+	TabID     int                    `json:"tab_id,omitempty"`
+	Params    map[string]interface{} `json:"params,omitempty"`
 }
 
 // Response represents a response from the server
@@ -74,7 +88,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	if cfg.Proxy != "" {
 		proxyServer = &playwright.Proxy{Server: cfg.Proxy}
 	}
-	
+
 	switch cfg.Browser {
 	case "firefox":
 		browser, err = pw.Firefox.Launch(playwright.BrowserTypeLaunchOptions{
@@ -102,41 +116,10 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("failed to launch browser: %w", err)
 	}
 
-	// Create context with dialog handler
-	context, err := browser.NewContext()
-	if err != nil {
-		browser.Close()
-		pw.Stop()
-		return nil, fmt.Errorf("failed to create context: %w", err)
-	}
-
-	// Auto-load saved cookies
-	cookies, err := GetCookieStorage().LoadAll()
-	if err == nil && len(cookies) > 0 {
-		optionalCookies := make([]playwright.OptionalCookie, len(cookies))
-		for i, c := range cookies {
-			optionalCookies[i] = c.ToOptionalCookie()
-		}
-		if err := context.AddCookies(optionalCookies); err != nil {
-			fmt.Printf("Warning: failed to load cookies: %v\n", err)
-		} else {
-			fmt.Printf("Loaded %d cookies from storage\n", len(cookies))
-		}
-	}
-
-	// Create initial tab
-	page, err := context.NewPage()
-	if err != nil {
-		context.Close()
-		browser.Close()
-		pw.Stop()
-		return nil, fmt.Errorf("failed to create page: %w", err)
-	}
-
-	// Determine socket path
+	// Determine socket path — single socket for all sessions
 	socketPath := cfg.SocketPath
 	if socketPath == "" {
-		socketPath = GetSocketPath(cfg.SessionID)
+		socketPath = GetSocketPath("")
 	}
 	os.MkdirAll(filepath.Dir(socketPath), 0755)
 
@@ -146,41 +129,57 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	// Create listener
 	listener, err := net.Listen("unix", socketPath)
 	if err != nil {
-		page.Close()
-		context.Close()
 		browser.Close()
 		pw.Stop()
 		return nil, fmt.Errorf("failed to create listener: %w", err)
 	}
 
+	idleTimeout := cfg.IdleTimeout
+	if idleTimeout <= 0 {
+		idleTimeout = 1 * time.Hour
+	}
+
 	server := &Server{
 		pw:           pw,
 		browser:      browser,
-		context:      context,
-		tabs:         map[int]playwright.Page{1: page},
-		activeTab:    1,
-		nextTabID:    2,
+		sessions:     make(map[string]*SessionState),
 		listener:     listener,
 		socketPath:   socketPath,
 		running:      true,
-		dialogChan:   make(chan playwright.Dialog, 10),
+		lastActivity: time.Now(),
+		idleTimeout:  idleTimeout,
+		browserType:  cfg.Browser,
+		headless:     cfg.Headless,
+		proxy:        cfg.Proxy,
 	}
 
-	// Setup dialog handler for initial tab (detect and notify, don't auto-handle)
-	page.On("dialog", func(dialog playwright.Dialog) {
-		server.mu.Lock()
-		server.pendingDialog = &DialogInfo{
-			Type:         dialog.Type(),
-			Message:      dialog.Message(),
-			DefaultValue: dialog.DefaultValue(),
-			TabID:        server.activeTab,
-		}
-		// Send dialog to channel for later handling
-		server.dialogChan <- dialog
-		server.mu.Unlock()
-	})
+	// Start idle timeout monitor
+	go server.idleMonitor()
 
 	return server, nil
+}
+
+// idleMonitor checks for idle timeout and shuts down the server if no commands
+// have been received within the configured idle period.
+func (s *Server) idleMonitor() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		s.mu.Lock()
+		if !s.running {
+			s.mu.Unlock()
+			return
+		}
+		idle := time.Since(s.lastActivity)
+		s.mu.Unlock()
+
+		if idle >= s.idleTimeout {
+			fmt.Printf("Server idle for %v (threshold: %v), shutting down...\n", idle.Round(time.Minute), s.idleTimeout)
+			s.Stop()
+			return
+		}
+	}
 }
 
 // Start starts the server and listens for commands
@@ -223,15 +222,88 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// Default session ID
+	if cmd.SessionID == "" {
+		cmd.SessionID = "default"
+	}
+
 	// Execute command
 	resp := s.executeCommand(cmd)
 	s.sendResponse(conn, resp)
+}
+
+// getSession returns an existing session or creates a new one
+func (s *Server) getSession(sessionID string) (*SessionState, error) {
+	if ss, ok := s.sessions[sessionID]; ok {
+		return ss, nil
+	}
+
+	// Create new BrowserContext
+	context, err := s.browser.NewContext()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create context for session %s: %w", sessionID, err)
+	}
+
+	// Auto-load saved cookies for this session
+	cookieStorage := NewSessionCookieStorage(sessionID)
+	cookies, err := cookieStorage.LoadAll()
+	if err == nil && len(cookies) > 0 {
+		optionalCookies := make([]playwright.OptionalCookie, len(cookies))
+		for i, c := range cookies {
+			optionalCookies[i] = c.ToOptionalCookie()
+		}
+		if err := context.AddCookies(optionalCookies); err != nil {
+			fmt.Printf("Warning: failed to load cookies for session %s: %v\n", sessionID, err)
+		} else {
+			fmt.Printf("Loaded %d cookies for session %s\n", len(cookies), sessionID)
+		}
+	}
+
+	// Create initial page
+	page, err := context.NewPage()
+	if err != nil {
+		context.Close()
+		return nil, fmt.Errorf("failed to create page for session %s: %w", sessionID, err)
+	}
+
+	ss := &SessionState{
+		ID:         sessionID,
+		Context:    context,
+		Tabs:       map[int]playwright.Page{1: page},
+		ActiveTab:  1,
+		NextTabID:  2,
+		DialogChan: make(chan playwright.Dialog, 10),
+	}
+
+	// Setup dialog handler for initial tab
+	s.setupDialogHandler(ss, page)
+
+	s.sessions[sessionID] = ss
+	return ss, nil
+}
+
+// setupDialogHandler sets up dialog detection for a page within a session
+func (s *Server) setupDialogHandler(ss *SessionState, page playwright.Page) {
+	page.On("dialog", func(dialog playwright.Dialog) {
+		s.mu.Lock()
+		ss.PendingDialog = &DialogInfo{
+			Type:         dialog.Type(),
+			Message:      dialog.Message(),
+			DefaultValue: dialog.DefaultValue(),
+			TabID:        ss.ActiveTab,
+		}
+		ss.DialogChan <- dialog
+		s.mu.Unlock()
+	})
 }
 
 // executeCommand executes a command and returns response
 func (s *Server) executeCommand(cmd Command) Response {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Update last activity time
+	s.lastActivity = time.Now()
 
 	return s.executeCommandInternal(cmd)
 }
@@ -243,18 +315,72 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		return Response{Success: true, Data: map[string]interface{}{"status": "ok"}}
 
 	case "status":
+		sessionList := make([]string, 0, len(s.sessions))
+		for id := range s.sessions {
+			sessionList = append(sessionList, id)
+		}
 		return Response{
 			Success: true,
 			Data: map[string]interface{}{
-				"running":    s.running,
-				"tabs":       len(s.tabs),
-				"active_tab": s.activeTab,
+				"running":       s.running,
+				"sessions":      sessionList,
+				"session_count": len(s.sessions),
+				"idle_timeout":  s.idleTimeout.String(),
+				"last_activity": s.lastActivity.Format(time.RFC3339),
 			},
 		}
 
+	// Session management commands
+	case "session_list":
+		sessionList := make([]string, 0, len(s.sessions))
+		for id := range s.sessions {
+			sessionList = append(sessionList, id)
+		}
+		return Response{Success: true, Data: map[string]interface{}{
+			"sessions": sessionList,
+			"count":    len(sessionList),
+		}}
+
+	case "session_status":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{
+			Success: true,
+			Data: map[string]interface{}{
+				"session":     cmd.SessionID,
+				"tabs":        len(ss.Tabs),
+				"active_tab":  ss.ActiveTab,
+				"has_dialog":  ss.PendingDialog != nil,
+			},
+		}
+
+	case "session_close":
+		ss, ok := s.sessions[cmd.SessionID]
+		if !ok {
+			return Response{Success: false, Error: fmt.Sprintf("Session %s not found", cmd.SessionID)}
+		}
+		// Save cookies before closing
+		s.saveSessionCookies(ss)
+		// Close all tabs and context
+		for _, page := range ss.Tabs {
+			page.Close()
+		}
+		ss.Context.Close()
+		delete(s.sessions, cmd.SessionID)
+		return Response{Success: true, Data: map[string]interface{}{
+			"message": fmt.Sprintf("Session %s closed", cmd.SessionID),
+		}}
+
+	// Tab commands — require a session
 	case "tab_list":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		var tabList []map[string]interface{}
-		for id, page := range s.tabs {
+		for id, page := range ss.Tabs {
 			tabList = append(tabList, map[string]interface{}{
 				"id":    id,
 				"url":   page.URL(),
@@ -264,61 +390,66 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		return Response{Success: true, Data: map[string]interface{}{"tabs": tabList}}
 
 	case "tab_new":
-		page, err := s.context.NewPage()
+		ss, err := s.getSession(cmd.SessionID)
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
-		// Setup dialog handler (detect and notify)
-		page.On("dialog", func(dialog playwright.Dialog) {
-			s.mu.Lock()
-			s.pendingDialog = &DialogInfo{
-				Type:         dialog.Type(),
-				Message:      dialog.Message(),
-				DefaultValue: dialog.DefaultValue(),
-				TabID:        s.activeTab,
-			}
-			s.dialogChan <- dialog
-			s.mu.Unlock()
-		})
-		id := s.nextTabID
-		s.tabs[id] = page
-		s.nextTabID++
-		s.activeTab = id
+		page, err := ss.Context.NewPage()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		s.setupDialogHandler(ss, page)
+		id := ss.NextTabID
+		ss.Tabs[id] = page
+		ss.NextTabID++
+		ss.ActiveTab = id
 		return Response{Success: true, Data: map[string]interface{}{"tab_id": id}}
 
 	case "tab_switch":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		tabID := cmd.TabID
-		if _, ok := s.tabs[tabID]; !ok {
+		if _, ok := ss.Tabs[tabID]; !ok {
 			return Response{Success: false, Error: fmt.Sprintf("Tab %d not found", tabID)}
 		}
-		s.activeTab = tabID
+		ss.ActiveTab = tabID
 		return Response{Success: true, Data: map[string]interface{}{"active_tab": tabID}}
 
 	case "tab_close":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		tabID := cmd.TabID
 		if tabID == 0 {
-			tabID = s.activeTab
+			tabID = ss.ActiveTab
 		}
-		if tabID == s.activeTab && len(s.tabs) == 1 {
+		if tabID == ss.ActiveTab && len(ss.Tabs) == 1 {
 			return Response{Success: false, Error: "Cannot close the last active tab"}
 		}
-		if page, ok := s.tabs[tabID]; ok {
+		if page, ok := ss.Tabs[tabID]; ok {
 			page.Close()
-			delete(s.tabs, tabID)
-			if tabID == s.activeTab {
-				// Switch to another tab
-				for id := range s.tabs {
-					s.activeTab = id
+			delete(ss.Tabs, tabID)
+			if tabID == ss.ActiveTab {
+				for id := range ss.Tabs {
+					ss.ActiveTab = id
 					break
 				}
 			}
 		}
 		return Response{Success: true}
 
+	// Navigation commands
 	case "navigate":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		url := cmd.Params["url"].(string)
-		page := s.tabs[s.activeTab]
-		_, err := page.Goto(url)
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.Goto(url)
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
@@ -331,10 +462,51 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 			},
 		}
 
+	case "back":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.GoBack()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "forward":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.GoForward()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "reload":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.Reload()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	// Interaction commands
 	case "click":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
-		page := s.tabs[s.activeTab]
-		err := page.Click(selector, playwright.PageClickOptions{
+		page := ss.Tabs[ss.ActiveTab]
+		err = page.Click(selector, playwright.PageClickOptions{
 			Force: playwright.Bool(true),
 		})
 		if err != nil {
@@ -343,9 +515,12 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		return Response{Success: true}
 
 	case "click-js":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
-		page := s.tabs[s.activeTab]
-		// Use JavaScript to click, bypassing Playwright's visibility checks
+		page := ss.Tabs[ss.ActiveTab]
 		script := fmt.Sprintf(`
 			(function() {
 				const el = document.querySelector('%s');
@@ -363,25 +538,32 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		return Response{Success: true, Data: map[string]interface{}{"result": result}}
 
 	case "smart-click":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
-		page := s.tabs[s.activeTab]
-		// Use SmartClick to handle Web Components
+		page := ss.Tabs[ss.ActiveTab]
 		browser := &Browser{page: page}
-		err := browser.SmartClick(selector, 30*time.Second)
+		err = browser.SmartClick(selector, 30*time.Second)
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
 		return Response{Success: true}
 
 	case "pick":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		x := cmd.Params["x"].(float64)
 		y := cmd.Params["y"].(float64)
 		depth := 5
 		if d, ok := cmd.Params["depth"].(float64); ok {
 			depth = int(d)
 		}
-		page := s.tabs[s.activeTab]
-		
+		page := ss.Tabs[ss.ActiveTab]
+
 		pickScript := fmt.Sprintf(`
 			(function() {
 				const x = %f;
@@ -391,10 +573,9 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 				const element = document.elementFromPoint(x, y);
 				if (!element) return { success: false, error: 'No element found at coordinates' };
 				
-				// Helper: generate CSS selector for an element
 				function generateSelector(el) {
 					if (el.id) return '#' + el.id;
-					if (el.tagName.includes('-')) return el.tagName.toLowerCase(); // Web Component
+					if (el.tagName.includes('-')) return el.tagName.toLowerCase();
 					let selector = el.tagName.toLowerCase();
 					if (el.className && typeof el.className === 'string') {
 						const classes = el.className.split(' ').filter(c => c && c.length < 30);
@@ -405,7 +586,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					return selector;
 				}
 				
-				// Helper: detect callable methods on element
 				function detectMethods(obj) {
 					const methods = [];
 					const patterns = ['_on', '_handle', 'handle', 'on', '_click', '_submit', '_action'];
@@ -424,7 +604,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					return methods;
 				}
 				
-				// Helper: get children summary (truncated)
 				function getChildrenSummary(el, maxItems = 5) {
 					const children = [];
 					for (let i = 0; i < Math.min(el.children.length, maxItems); i++) {
@@ -437,7 +616,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					return children;
 				}
 				
-				// Helper: get attributes
 				function getAttributes(el) {
 					const attrs = {};
 					for (const attr of el.attributes) {
@@ -450,7 +628,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					return attrs;
 				}
 				
-				// Build target info
 				const target = {
 					tagName: element.tagName,
 					selector: generateSelector(element),
@@ -465,7 +642,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					}
 				};
 				
-				// Build ancestor chain
 				const ancestors = [];
 				let current = element.parentElement;
 				let level = 1;
@@ -482,7 +658,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					level++;
 				}
 				
-				// Check for Shadow DOM
 				let shadowDOM = null;
 				if (element.shadowRoot) {
 					shadowDOM = {
@@ -491,7 +666,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					};
 				}
 				
-				// Generate suggestions
 				const suggestions = [];
 				if (element.tagName.includes('-')) {
 					suggestions.push('Web Component detected: try smart-click or check methods');
@@ -512,22 +686,24 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 				};
 			})();
 		`, x, y, depth)
-		
+
 		result, err := page.Evaluate(pickScript)
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
-		// Convert result to map
 		if resultMap, ok := result.(map[string]interface{}); ok {
 			return Response{Success: true, Data: resultMap}
 		}
 		return Response{Success: true, Data: map[string]interface{}{"result": result}}
 
 	case "hover":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
-		page := s.tabs[s.activeTab]
-		
-		// First, get the element's position
+		page := ss.Tabs[ss.ActiveTab]
+
 		posScript := fmt.Sprintf(`
 			(function() {
 				const el = document.querySelector('%s');
@@ -540,18 +716,13 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
-		
-		// Show virtual cursor at the position
+
 		if posResult != nil {
-			// Convert posResult to JSON string for embedding in script
 			posJSON, _ := json.Marshal(posResult)
 			cursorScript := fmt.Sprintf(`
 				(function() {
-					// Remove existing cursor
 					const existing = document.getElementById('virtual-cursor');
 					if (existing) existing.remove();
-					
-					// Create new cursor
 					const cursor = document.createElement('div');
 					cursor.id = 'virtual-cursor';
 					cursor.style.cssText = 'position:fixed;width:20px;height:20px;background:red;border-radius:50%%;z-index:99999;pointer-events:none;transition:all 0.1s;';
@@ -564,8 +735,7 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 			`, string(posJSON))
 			page.Evaluate(cursorScript)
 		}
-		
-		// Perform hover
+
 		err = page.Hover(selector, playwright.PageHoverOptions{
 			Force: playwright.Bool(true),
 		})
@@ -575,157 +745,42 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		return Response{Success: true}
 
 	case "fill":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
 		value := cmd.Params["value"].(string)
-		page := s.tabs[s.activeTab]
-		err := page.Fill(selector, value)
+		page := ss.Tabs[ss.ActiveTab]
+		err = page.Fill(selector, value)
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
 		return Response{Success: true}
 
 	case "type":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
 		text := cmd.Params["text"].(string)
-		page := s.tabs[s.activeTab]
-		err := page.Type(selector, text)
-		if err != nil {
-			return Response{Success: false, Error: err.Error()}
-		}
-		return Response{Success: true}
-
-	case "eval":
-		script := cmd.Params["script"].(string)
-		page := s.tabs[s.activeTab]
-		result, err := page.Evaluate(script)
-		if err != nil {
-			return Response{Success: false, Error: err.Error()}
-		}
-		return Response{Success: true, Data: map[string]interface{}{"value": result}}
-
-	case "screenshot":
-		path := cmd.Params["path"].(string)
-		if path == "" {
-			path = "screenshot.png"
-		}
-		page := s.tabs[s.activeTab]
-		_, err := page.Screenshot(playwright.PageScreenshotOptions{
-			Path:    playwright.String(path),
-			Timeout: playwright.Float(5000), // 5 seconds timeout
-		})
-		if err != nil {
-			return Response{Success: false, Error: err.Error()}
-		}
-		return Response{Success: true, Data: map[string]interface{}{"path": path}}
-
-	case "text":
-		page := s.tabs[s.activeTab]
-		text, err := page.InnerText("body")
-		if err != nil {
-			return Response{Success: false, Error: err.Error()}
-		}
-		return Response{Success: true, Data: map[string]interface{}{"text": text}}
-
-	case "wait":
-		selector := cmd.Params["selector"].(string)
-		timeout := 30000.0
-		if t, ok := cmd.Params["timeout"].(float64); ok {
-			timeout = t
-		}
-		page := s.tabs[s.activeTab]
-		_, err := page.WaitForSelector(selector, playwright.PageWaitForSelectorOptions{
-			Timeout: playwright.Float(timeout),
-		})
-		if err != nil {
-			return Response{Success: false, Error: err.Error()}
-		}
-		return Response{Success: true}
-
-	// Dialog commands
-	case "dialog_status":
-		if s.pendingDialog == nil {
-			return Response{Success: true, Data: map[string]interface{}{"dialog": nil}}
-		}
-		return Response{Success: true, Data: map[string]interface{}{"dialog": s.pendingDialog}}
-
-	case "dialog_accept":
-		if s.pendingDialog == nil {
-			return Response{Success: false, Error: "No pending dialog"}
-		}
-		// Get dialog from channel
-		select {
-		case dialog := <-s.dialogChan:
-			value := ""
-			if v, ok := cmd.Params["value"].(string); ok {
-				value = v
-			}
-			if value != "" && s.pendingDialog.Type == "prompt" {
-				dialog.Accept(value)
-			} else {
-				dialog.Accept()
-			}
-			s.pendingDialog = nil
-			return Response{Success: true, Data: map[string]interface{}{"action": "accepted"}}
-		default:
-			return Response{Success: false, Error: "Dialog event not received"}
-		}
-
-	case "dialog_dismiss":
-		if s.pendingDialog == nil {
-			return Response{Success: false, Error: "No pending dialog"}
-		}
-		// Get dialog from channel
-		select {
-		case dialog := <-s.dialogChan:
-			dialog.Dismiss()
-			s.pendingDialog = nil
-			return Response{Success: true, Data: map[string]interface{}{"action": "dismissed"}}
-		default:
-			return Response{Success: false, Error: "Dialog event not received"}
-		}
-
-	case "scroll":
-		direction := cmd.Params["direction"].(string)
-		distance := 300.0
-		if d, ok := cmd.Params["distance"].(float64); ok {
-			distance = d
-		}
-		page := s.tabs[s.activeTab]
-		if direction == "up" {
-			distance = -distance
-		}
-		page.Evaluate(fmt.Sprintf("window.scrollBy(0, %f)", distance))
-		return Response{Success: true}
-
-	case "back":
-		page := s.tabs[s.activeTab]
-		_, err := page.GoBack()
-		if err != nil {
-			return Response{Success: false, Error: err.Error()}
-		}
-		return Response{Success: true}
-
-	case "forward":
-		page := s.tabs[s.activeTab]
-		_, err := page.GoForward()
-		if err != nil {
-			return Response{Success: false, Error: err.Error()}
-		}
-		return Response{Success: true}
-
-	case "reload":
-		page := s.tabs[s.activeTab]
-		_, err := page.Reload()
+		page := ss.Tabs[ss.ActiveTab]
+		err = page.Type(selector, text)
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
 		}
 		return Response{Success: true}
 
 	case "select":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
 		value := cmd.Params["value"].(string)
-		page := s.tabs[s.activeTab]
-		_, err := page.SelectOption(selector, playwright.SelectOptionValues{
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.SelectOption(selector, playwright.SelectOptionValues{
 			Values: &[]string{value},
 		})
 		if err != nil {
@@ -733,9 +788,58 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		}
 		return Response{Success: true}
 
+	// Extraction commands
+	case "eval":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		script := cmd.Params["script"].(string)
+		page := ss.Tabs[ss.ActiveTab]
+		result, err := page.Evaluate(script)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"value": result}}
+
+	case "screenshot":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		path := cmd.Params["path"].(string)
+		if path == "" {
+			path = "screenshot.png"
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.Screenshot(playwright.PageScreenshotOptions{
+			Path:    playwright.String(path),
+			Timeout: playwright.Float(5000),
+		})
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"path": path}}
+
+	case "text":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		text, err := page.InnerText("body")
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"text": text}}
+
 	case "elements":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
 		selector := cmd.Params["selector"].(string)
-		page := s.tabs[s.activeTab]
+		page := ss.Tabs[ss.ActiveTab]
 		elements, err := page.QuerySelectorAll(selector)
 		if err != nil {
 			return Response{Success: false, Error: err.Error()}
@@ -762,8 +866,227 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 			"items": items,
 		}}
 
+	// Wait/scroll
+	case "wait":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		selector := cmd.Params["selector"].(string)
+		timeout := 30000.0
+		if t, ok := cmd.Params["timeout"].(float64); ok {
+			timeout = t
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.WaitForSelector(selector, playwright.PageWaitForSelectorOptions{
+			Timeout: playwright.Float(timeout),
+		})
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "scroll":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		direction := cmd.Params["direction"].(string)
+		distance := 300.0
+		if d, ok := cmd.Params["distance"].(float64); ok {
+			distance = d
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		if direction == "up" {
+			distance = -distance
+		}
+		page.Evaluate(fmt.Sprintf("window.scrollBy(0, %f)", distance))
+		return Response{Success: true}
+
+	case "upload":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		selector := cmd.Params["selector"].(string)
+		path := cmd.Params["path"].(string)
+		page := ss.Tabs[ss.ActiveTab]
+		el, err := page.QuerySelector(selector)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		if el == nil {
+			return Response{Success: false, Error: "Element not found: " + selector}
+		}
+		err = el.SetInputFiles(path)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"path": path}}
+
+	case "pdf":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		path := "output.pdf"
+		if p, ok := cmd.Params["path"].(string); ok && p != "" {
+			path = p
+		}
+		landscape := false
+		if l, ok := cmd.Params["landscape"].(bool); ok {
+			landscape = l
+		}
+		format := "A4"
+		if f, ok := cmd.Params["format"].(string); ok && f != "" {
+			format = f
+		}
+		page := ss.Tabs[ss.ActiveTab]
+		_, err = page.PDF(playwright.PagePdfOptions{
+			Path:      playwright.String(path),
+			Landscape: playwright.Bool(landscape),
+			Format:    playwright.String(format),
+		})
+		if err != nil {
+			return Response{Success: false, Error: fmt.Errorf("PDF generation failed (note: only supported in Chromium): %w", err).Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"path": path}}
+
+	case "keyboard":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		key := cmd.Params["key"].(string)
+		page := ss.Tabs[ss.ActiveTab]
+		err = page.Keyboard().Press(key)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"key": key}}
+
+	case "right-click":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		selector := cmd.Params["selector"].(string)
+		page := ss.Tabs[ss.ActiveTab]
+		err = page.Click(selector, playwright.PageClickOptions{
+			Button: playwright.MouseButtonRight,
+			Force:  playwright.Bool(true),
+		})
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	case "dblclick":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		selector := cmd.Params["selector"].(string)
+		page := ss.Tabs[ss.ActiveTab]
+		err = page.Dblclick(selector, playwright.PageDblclickOptions{
+			Force: playwright.Bool(true),
+		})
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true}
+
+	// Dialog commands
+	case "dialog_status":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		if ss.PendingDialog == nil {
+			return Response{Success: true, Data: map[string]interface{}{"dialog": nil}}
+		}
+		return Response{Success: true, Data: map[string]interface{}{"dialog": ss.PendingDialog}}
+
+	case "dialog_accept":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		if ss.PendingDialog == nil {
+			return Response{Success: false, Error: "No pending dialog"}
+		}
+		select {
+		case dialog := <-ss.DialogChan:
+			value := ""
+			if v, ok := cmd.Params["value"].(string); ok {
+				value = v
+			}
+			if value != "" && ss.PendingDialog.Type == "prompt" {
+				dialog.Accept(value)
+			} else {
+				dialog.Accept()
+			}
+			ss.PendingDialog = nil
+			return Response{Success: true, Data: map[string]interface{}{"action": "accepted"}}
+		default:
+			return Response{Success: false, Error: "Dialog event not received"}
+		}
+
+	case "dialog_dismiss":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		if ss.PendingDialog == nil {
+			return Response{Success: false, Error: "No pending dialog"}
+		}
+		select {
+		case dialog := <-ss.DialogChan:
+			dialog.Dismiss()
+			ss.PendingDialog = nil
+			return Response{Success: true, Data: map[string]interface{}{"action": "dismissed"}}
+		default:
+			return Response{Success: false, Error: "Dialog event not received"}
+		}
+
+	// Cookie commands
+	case "cookie_list":
+		cookieStorage := NewSessionCookieStorage(cmd.SessionID)
+		infos, err := cookieStorage.List()
+		if err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		return Response{Success: true, Data: map[string]interface{}{
+			"domains": infos,
+			"count":   len(infos),
+		}}
+
+	case "cookie_clear":
+		cookieStorage := NewSessionCookieStorage(cmd.SessionID)
+		domain := ""
+		if d, ok := cmd.Params["domain"].(string); ok {
+			domain = d
+		}
+		clearAll := false
+		if a, ok := cmd.Params["all"].(bool); ok {
+			clearAll = a
+		}
+		if domain == "" && !clearAll {
+			return Response{Success: false, Error: "specify a domain or use all=true"}
+		}
+		if err := cookieStorage.Clear(domain); err != nil {
+			return Response{Success: false, Error: err.Error()}
+		}
+		msg := fmt.Sprintf("Cookies cleared for session %s", cmd.SessionID)
+		if clearAll {
+			msg = fmt.Sprintf("All cookies cleared for session %s", cmd.SessionID)
+		} else {
+			msg = fmt.Sprintf("Cookies cleared for %s in session %s", domain, cmd.SessionID)
+		}
+		return Response{Success: true, Data: map[string]interface{}{"message": msg}}
+
+	// Run multi-step
 	case "run":
-		// Execute multiple actions in sequence
 		actions, ok := cmd.Params["actions"].([]interface{})
 		if !ok {
 			return Response{Success: false, Error: "run requires actions array"}
@@ -779,12 +1102,11 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 				})
 				continue
 			}
-			// Create sub-command
 			subCmd := Command{
-				Action: actionMap["action"].(string),
-				Params: actionMap["params"].(map[string]interface{}),
+				Action:    actionMap["action"].(string),
+				SessionID: cmd.SessionID,
+				Params:    actionMap["params"].(map[string]interface{}),
 			}
-			// Execute without locking (already locked)
 			resp := s.executeCommandInternal(subCmd)
 			result := map[string]interface{}{
 				"step":   i + 1,
@@ -807,7 +1129,6 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 
 	case "stop":
 		s.running = false
-		// Stop will be called after response is sent
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			s.Stop()
@@ -816,6 +1137,18 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 
 	default:
 		return Response{Success: false, Error: fmt.Sprintf("Unknown action: %s", cmd.Action)}
+	}
+}
+
+// saveSessionCookies saves cookies for a session before it's closed
+func (s *Server) saveSessionCookies(ss *SessionState) {
+	if ss.Context == nil {
+		return
+	}
+	cookies, err := ss.Context.Cookies()
+	if err == nil && len(cookies) > 0 {
+		cookieStorage := NewSessionCookieStorage(ss.ID)
+		cookieStorage.SaveAll(cookies)
 	}
 }
 
@@ -829,48 +1162,48 @@ func (s *Server) sendResponse(conn net.Conn, resp Response) {
 	conn.Write(data)
 }
 
-// Stop stops the server
+// Stop stops the server and cleans up all resources.
+// Safe to call multiple times — only executes once via stopOnce.
 func (s *Server) Stop() {
-	s.running = false
+	s.stopOnce.Do(func() {
+		s.running = false
 
-	// Save cookies
-	if s.context != nil {
-		cookies, err := s.context.Cookies()
-		if err == nil && len(cookies) > 0 {
-			GetCookieStorage().SaveAll(cookies)
+		// Save cookies and close all sessions
+		for id, ss := range s.sessions {
+			s.saveSessionCookies(ss)
+			for _, page := range ss.Tabs {
+				page.Close()
+			}
+			if ss.Context != nil {
+				ss.Context.Close()
+			}
+			delete(s.sessions, id)
 		}
-	}
 
-	// Close all tabs
-	for _, page := range s.tabs {
-		page.Close()
-	}
+		// Close browser
+		if s.browser != nil {
+			s.browser.Close()
+		}
 
-	// Close browser
-	if s.browser != nil {
-		s.browser.Close()
-	}
+		// Stop Playwright
+		if s.pw != nil {
+			s.pw.Stop()
+		}
 
-	// Stop Playwright
-	if s.pw != nil {
-		s.pw.Stop()
-	}
+		// Close listener (unblocks Accept() in Start())
+		if s.listener != nil {
+			s.listener.Close()
+		}
 
-	// Close listener
-	if s.listener != nil {
-		s.listener.Close()
-	}
-
-	// Remove socket file
-	os.Remove(s.socketPath)
+		// Remove socket file
+		os.Remove(s.socketPath)
+	})
 }
 
-// GetSocketPath returns the socket path for a session
+// GetSocketPath returns the socket path for the server
+// In single-server mode, there's only one socket regardless of session
 func GetSocketPath(sessionID string) string {
-	if sessionID == "" {
-		sessionID = "default"
-	}
-	return filepath.Join("/tmp", "browser-cli", "sessions", sessionID, "server.sock")
+	return filepath.Join("/tmp", "browser-cli", "server.sock")
 }
 
 // Client connects to the browser server
@@ -879,9 +1212,9 @@ type Client struct {
 }
 
 // NewClient creates a new client
-func NewClient(socketPath string, sessionID string) *Client {
+func NewClient(socketPath string) *Client {
 	if socketPath == "" {
-		socketPath = GetSocketPath(sessionID)
+		socketPath = GetSocketPath("")
 	}
 	return &Client{socketPath: socketPath}
 }

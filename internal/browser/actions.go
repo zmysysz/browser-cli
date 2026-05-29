@@ -215,3 +215,39 @@ func (b *Browser) Reload(timeout time.Duration) error {
 	}
 	return nil
 }
+
+// Upload sets files on a file input element
+func (b *Browser) Upload(selector, path string, timeout time.Duration) error {
+	el, err := b.page.WaitForSelector(selector, playwright.PageWaitForSelectorOptions{
+		Timeout: playwright.Float(float64(timeout.Milliseconds())),
+	})
+	if err != nil {
+		return fmt.Errorf("element not found: %w", err)
+	}
+	if err := el.SetInputFiles(path); err != nil {
+		return fmt.Errorf("upload failed: %w", err)
+	}
+	return nil
+}
+
+// PDF saves the current page as a PDF file (Chromium only)
+func (b *Browser) PDF(path string, landscape bool, format string) error {
+	_, err := b.page.PDF(playwright.PagePdfOptions{
+		Path:      playwright.String(path),
+		Landscape: playwright.Bool(landscape),
+		Format:    playwright.String(format),
+	})
+	if err != nil {
+		return fmt.Errorf("PDF generation failed (Chromium only): %w", err)
+	}
+	return nil
+}
+
+// KeyboardPress presses a keyboard key or key combination
+func (b *Browser) KeyboardPress(key string) error {
+	err := b.page.Keyboard().Press(key)
+	if err != nil {
+		return fmt.Errorf("keyboard press failed: %w", err)
+	}
+	return nil
+}

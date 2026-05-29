@@ -11,12 +11,13 @@ import (
 
 var (
 	// Global flags
-	browserType string
-	headless   bool
-	timeout    time.Duration
-	outputFmt   string
-	sessionID   string
-	proxy      string
+	browserType   string
+	headless      bool
+	timeout       time.Duration
+	outputFmt     string
+	sessionID     string
+	proxy         string
+	idleTimeout   time.Duration
 
 	// Version
 	version string
@@ -78,9 +79,10 @@ func init() {
 		"Default timeout for operations (e.g. 30s, 1m)")
 	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "markdown", 
 		"Output format: json (recommended for AI), markdown (human-readable)")
-	rootCmd.PersistentFlags().StringVarP(&sessionID, "session", "s", "", 
-		"Session ID for isolated browser instance (required)")
-	rootCmd.PersistentFlags().StringVar(&proxy, "proxy", "", 
+	rootCmd.PersistentFlags().StringVarP(&sessionID, "session", "s", "default",
+		"Session ID for isolated browser context (each session gets its own cookies/storage)")
+	rootCmd.PersistentFlags().StringVar(&proxy, "proxy", "",
 		"Proxy server URL (e.g. http://proxy.example.com:8080 or socks5://proxy:1080)")
-	rootCmd.MarkPersistentFlagRequired("session")
+	rootCmd.PersistentFlags().DurationVar(&idleTimeout, "idle-timeout", 1*time.Hour,
+		"Auto-shutdown server after idle period (e.g. 30m, 1h, 0 to disable)")
 }

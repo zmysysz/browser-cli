@@ -15,9 +15,10 @@ import (
 )
 
 var (
-	serverBrowser  string
-	serverHeadless bool
-	serverSocket   string
+	serverBrowser     string
+	serverHeadless    bool
+	serverSocket      string
+	serverIdleTimeout time.Duration
 )
 
 // printSuccess prints a success result
@@ -29,9 +30,7 @@ func printSuccess(cmd string, data interface{}) {
 	if data != nil {
 		output["data"] = data
 	}
-	if sessionID != "" {
-		output["session"] = sessionID
-	}
+	output["session"] = sessionID
 	dataBytes, _ := json.MarshalIndent(output, "", "  ")
 	fmt.Println(string(dataBytes))
 }
@@ -43,9 +42,7 @@ func printError(cmd string, err error) {
 		"status":  "error",
 		"error":   err.Error(),
 	}
-	if sessionID != "" {
-		output["session"] = sessionID
-	}
+	output["session"] = sessionID
 	dataBytes, _ := json.MarshalIndent(output, "", "  ")
 	fmt.Println(string(dataBytes))
 	os.Exit(1)
@@ -56,6 +53,9 @@ var serverCmd = &cobra.Command{
 	Use:   "server",
 	Short: "Start a persistent browser server (foreground)",
 	Long: `Start a persistent browser server in foreground mode.
+
+The server manages a single browser instance with multiple isolated contexts.
+Each --session gets its own BrowserContext with independent cookies/storage.
 
 This is for manual use when you want to see server logs.
 For normal use, the server is auto-started when needed.
@@ -81,11 +81,10 @@ var statusCmd = &cobra.Command{
 	Long: `Check if the browser server is running and get its status.
 
 OUTPUT:
-  Returns server status: running, active_tab, tabs count
+  Returns server status: running, session_count, sessions list
 
 EXAMPLES:
-  browser-cli status
-  browser-cli --session agent-1 status`,
+  browser-cli status`,
 	RunE: runStatus,
 }
 
@@ -93,13 +92,13 @@ EXAMPLES:
 var stopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the browser server",
-	Long: `Stop the browser server and save cookies.
+	Long: `Stop the browser server and save all session cookies.
 
 The server will be auto-started again when needed.
+This closes ALL sessions.
 
 EXAMPLES:
-  browser-cli stop
-  browser-cli --session agent-1 stop`,
+  browser-cli stop`,
 	RunE: runStop,
 }
 
@@ -107,7 +106,7 @@ EXAMPLES:
 var sessionListCmd = &cobra.Command{
 	Use:   "session-list",
 	Short: "List all active browser sessions",
-	Long: `List all active browser sessions.
+	Long: `List all active browser sessions (contexts) in the server.
 
 OUTPUT:
   Returns a list of session IDs
@@ -115,6 +114,22 @@ OUTPUT:
 EXAMPLES:
   browser-cli session-list`,
 	RunE: runSessionList,
+}
+
+// sessionCloseCmd closes a specific session
+var sessionCloseCmd = &cobra.Command{
+	Use:   "session-close",
+	Short: "Close a browser session",
+	Long: `Close a specific browser session (BrowserContext) while keeping the server running.
+Cookies are automatically saved before closing.
+
+The server itself remains running and other sessions are not affected.
+
+EXAMPLES:
+  browser-cli --session agent-1 session-close`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return sendCommand("session_close", nil)
+	},
 }
 
 // Tab commands
@@ -263,6 +278,7 @@ func init() {
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(stopCmd)
 	rootCmd.AddCommand(sessionListCmd)
+	rootCmd.AddCommand(sessionCloseCmd)
 
 	// Tab commands
 	rootCmd.AddCommand(tabNewCmd)
@@ -279,34 +295,32 @@ func init() {
 	serverCmd.Flags().StringVar(&serverBrowser, "browser", "chromium", "Browser to use")
 	serverCmd.Flags().BoolVar(&serverHeadless, "headless", true, "Run in headless mode")
 	serverCmd.Flags().StringVar(&serverSocket, "socket", "", "Unix socket path")
+	serverCmd.Flags().DurationVar(&serverIdleTimeout, "idle-timeout", 1*time.Hour, "Auto-shutdown after idle period (e.g. 30m, 1h, 0 to disable)")
 
 	serverStartCmd.Flags().StringVar(&serverBrowser, "browser", "chromium", "Browser to use")
 	serverStartCmd.Flags().BoolVar(&serverHeadless, "headless", true, "Run in headless mode")
+	serverStartCmd.Flags().DurationVar(&serverIdleTimeout, "idle-timeout", 1*time.Hour, "Auto-shutdown after idle period")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
 	// Check if server already running
-	client := browser.NewClient(serverSocket, sessionID)
+	client := browser.NewClient("")
 	resp, err := client.SendCommand(browser.Command{Action: "status"})
 	if err == nil && resp.Success {
 		fmt.Println("Server already running!")
-		fmt.Printf("Session: %s\n", sessionID)
-		fmt.Printf("Active tab: %v, Tabs: %v\n", resp.Data["active_tab"], resp.Data["tabs"])
+		fmt.Printf("Sessions: %v, Session count: %v\n", resp.Data["sessions"], resp.Data["session_count"])
 		return nil
 	}
 
 	// Start new server
 	fmt.Println("Starting browser server...")
-	if sessionID != "" {
-		fmt.Printf("Session: %s\n", sessionID)
-	}
 
 	cfg := browser.ServerConfig{
-		Browser:    serverBrowser,
-		Headless:   serverHeadless,
-		SocketPath: serverSocket,
-		SessionID:  sessionID,
-		Proxy:      proxy,
+		Browser:     serverBrowser,
+		Headless:    serverHeadless,
+		SocketPath:  serverSocket,
+		Proxy:       proxy,
+		IdleTimeout: serverIdleTimeout,
 	}
 
 	server, err := browser.NewServer(cfg)
@@ -329,7 +343,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 
 func runServerStart(cmd *cobra.Command, args []string) error {
 	// Check if server already running
-	client := browser.NewClient(serverSocket, sessionID)
+	client := browser.NewClient("")
 	resp, err := client.SendCommand(browser.Command{Action: "status"})
 	if err == nil && resp.Success {
 		// Already running, just exit
@@ -338,11 +352,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 
 	// Start new server
 	cfg := browser.ServerConfig{
-		Browser:    serverBrowser,
-		Headless:   serverHeadless,
-		SocketPath: serverSocket,
-		SessionID:  sessionID,
-		Proxy:      proxy,
+		Browser:     serverBrowser,
+		Headless:    serverHeadless,
+		SocketPath:  serverSocket,
+		Proxy:       proxy,
+		IdleTimeout: serverIdleTimeout,
 	}
 
 	server, err := browser.NewServer(cfg)
@@ -363,7 +377,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	client := browser.NewClient("", sessionID)
+	client := browser.NewClient("")
 	resp, err := client.SendCommand(browser.Command{Action: "status"})
 	if err != nil {
 		return fmt.Errorf("server not running: %w", err)
@@ -374,9 +388,6 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		"status":  "success",
 		"data":    resp.Data,
 	}
-	if sessionID != "" {
-		output["session"] = sessionID
-	}
 
 	data, _ := json.MarshalIndent(output, "", "  ")
 	fmt.Println(string(data))
@@ -384,7 +395,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
-	client := browser.NewClient("", sessionID)
+	client := browser.NewClient("")
 	resp, err := client.SendCommand(browser.Command{Action: "stop"})
 	if err != nil {
 		return fmt.Errorf("failed to stop server: %w", err)
@@ -392,23 +403,22 @@ func runStop(cmd *cobra.Command, args []string) error {
 
 	if resp.Success {
 		fmt.Println("Server stopped successfully")
-		if sessionID != "" {
-			fmt.Printf("Session: %s\n", sessionID)
-		}
 	}
 	return nil
 }
 
 func runSessionList(cmd *cobra.Command, args []string) error {
-	sessions, err := browser.ListSessions()
+	client := browser.NewClient("")
+	resp, err := client.SendCommand(browser.Command{Action: "session_list"})
 	if err != nil {
-		return fmt.Errorf("failed to list sessions: %w", err)
+		return fmt.Errorf("server not running: %w", err)
 	}
 
 	output := map[string]interface{}{
 		"command":  "session-list",
 		"status":   "success",
-		"sessions": sessions,
+		"sessions": resp.Data["sessions"],
+		"count":    resp.Data["count"],
 	}
 
 	data, _ := json.MarshalIndent(output, "", "  ")
@@ -418,25 +428,27 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 
 // ensureServer ensures a browser server is running, starts one if not
 func ensureServer() (*browser.Client, error) {
-	client := browser.NewClient("", sessionID)
+	client := browser.NewClient("")
 
 	// Check if server is already running
 	resp, err := client.SendCommand(browser.Command{Action: "status"})
 	if err == nil && resp.Success {
-		// Server already running
 		return client, nil
 	}
 
 	// Server not running, start it in background
 	serverCmd := exec.Command(os.Args[0], "server-start")
-	if sessionID != "" {
-		serverCmd.Args = append(serverCmd.Args, "--session", sessionID)
-	}
 	// Add headless flag based on current setting
 	if headless {
 		serverCmd.Args = append(serverCmd.Args, "--headless")
 	} else {
 		serverCmd.Args = append(serverCmd.Args, "--headless=false")
+	}
+	// Pass idle timeout
+	if idleTimeout > 0 {
+		serverCmd.Args = append(serverCmd.Args, "--idle-timeout", idleTimeout.String())
+	} else {
+		serverCmd.Args = append(serverCmd.Args, "--idle-timeout", "0")
 	}
 
 	// Start server in background
@@ -444,8 +456,8 @@ func ensureServer() (*browser.Client, error) {
 		return nil, fmt.Errorf("failed to start server: %w", err)
 	}
 
-	// Wait for server to be ready (increased timeout for Playwright initialization)
-	for i := 0; i < 60; i++ { // 60 * 500ms = 30 seconds
+	// Wait for server to be ready
+	for i := 0; i < 60; i++ {
 		time.Sleep(500 * time.Millisecond)
 		resp, err = client.SendCommand(browser.Command{Action: "status"})
 		if err == nil && resp.Success {
@@ -464,8 +476,9 @@ func sendCommand(action string, params map[string]interface{}) error {
 	}
 
 	cmd := browser.Command{
-		Action: action,
-		Params: params,
+		Action:    action,
+		SessionID: sessionID,
+		Params:    params,
 	}
 
 	// Extract tab_id from params if present
@@ -491,9 +504,7 @@ func sendCommand(action string, params map[string]interface{}) error {
 		output["status"] = "error"
 		output["error"] = resp.Error
 	}
-	if sessionID != "" {
-		output["session"] = sessionID
-	}
+	output["session"] = sessionID
 
 	data, _ := json.MarshalIndent(output, "", "  ")
 	fmt.Println(string(data))
