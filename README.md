@@ -1,5 +1,7 @@
 # Browser-CLI
 
+[English](README.md) | [中文](README_zh.md)
+
 A powerful command-line tool for browser automation, designed specifically for AI agents and automated workflows.
 
 ## Why Browser-CLI?
@@ -89,6 +91,10 @@ browser-cli run "navigate https://example.com; click a; text"
 | `select <selector> <value>` | Select dropdown option |
 | `eval <script>` | Execute JavaScript |
 | `pick <x> <y> [--depth=N]` | Pick element at coordinates, return DOM hierarchy and methods |
+| `right-click <selector>` | Right-click element (context menu) |
+| `dblclick <selector>` | Double-click element |
+| `upload <selector> <file>` | Upload file to file input |
+| `keyboard <key>` | Press keyboard key/combo (e.g. Ctrl+A, Enter) |
 
 ### Web Component Support
 
@@ -136,6 +142,73 @@ Use cases:
 - Understand Shadow DOM structure
 - Debug why `click()` doesn't work on custom elements
 
+## File Upload
+
+Upload files to file input elements:
+
+```bash
+# Upload a single file
+browser-cli upload "#file-input" ./document.pdf
+
+# Upload to a specific input type
+browser-cli upload "input[type=file]" /tmp/image.png
+```
+
+## PDF Export
+
+Save the current page as a PDF file (Chromium only):
+
+```bash
+# Save as PDF with default settings (A4, portrait)
+browser-cli pdf
+
+# Custom output path
+browser-cli pdf report.pdf
+
+# Landscape orientation and Letter format
+browser-cli pdf --landscape --format Letter page.pdf
+```
+
+## Keyboard Shortcuts
+
+Press keyboard keys and key combinations:
+
+```bash
+# Single keys
+browser-cli keyboard "Enter"
+browser-cli keyboard "Escape"
+browser-cli keyboard "Tab"
+
+# Key combinations
+browser-cli keyboard "Ctrl+A"        # Select all
+browser-cli keyboard "Ctrl+C"        # Copy
+browser-cli keyboard "Ctrl+V"        # Paste
+browser-cli keyboard "Ctrl+Shift+I"  # DevTools
+```
+
+### Supported Keys
+
+| Category | Keys |
+|----------|------|
+| Single | Enter, Escape, Tab, Backspace, Delete, Space |
+| Modifiers | Ctrl+, Alt+, Shift+, Meta+ |
+| Arrows | ArrowUp, ArrowDown, ArrowLeft, ArrowRight |
+| Function | F1-F12 |
+
+## Advanced Click
+
+Beyond the basic `click` command, Browser-CLI supports right-click and double-click:
+
+```bash
+# Right-click to open context menu
+browser-cli right-click "#menu-item"
+browser-cli right-click ".context-target"
+
+# Double-click to select or activate
+browser-cli dblclick "#item"
+browser-cli dblclick "td.editable"
+```
+
 ### Extraction Commands
 
 | Command | Description |
@@ -143,6 +216,7 @@ Use cases:
 | `screenshot [path]` | Take screenshot |
 | `text` | Extract page text |
 | `elements <selector>` | Find elements |
+| `pdf [file]` | Save page as PDF (Chromium only, flags: --landscape, --format) |
 
 ### Utility Commands
 
@@ -313,14 +387,17 @@ browser-cli click "button[type=submit]"
 # 2. Wait for login
 browser-cli wait ".dashboard"
 
-# 3. Check for dialogs
+# 3. Press keyboard shortcut
+browser-cli keyboard "Enter"
+
+# 4. Check for dialogs
 browser-cli dialog-status
 
-# 4. Extract data
+# 5. Extract data
 browser-cli text
 browser-cli screenshot result.png
 
-# 5. Stop server (cookies auto-saved)
+# 6. Stop server (cookies auto-saved)
 browser-cli stop
 ```
 
