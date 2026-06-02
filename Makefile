@@ -1,4 +1,4 @@
-.PHONY: build install clean test
+.PHONY: build build-static install clean test
 
 BINARY := browser-cli
 BUILD_DIR := bin
@@ -13,6 +13,11 @@ GO_ENV := GOPATH=$(GOPATH) GOMODCACHE=$(GOMODCACHE)
 build:
 	@mkdir -p $(BUILD_DIR)
 	$(GO_ENV) go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) ./cmd/browser-cli
+
+# Static build without CGO (portable, no system library dependencies)
+build-static:
+	@mkdir -p $(BUILD_DIR)
+	CGO_ENABLED=0 $(GO_ENV) go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY) ./cmd/browser-cli
 
 install: build
 	cp $(BUILD_DIR)/$(BINARY) /usr/local/bin/

@@ -2,21 +2,32 @@
 
 [English](README.md) | [中文](README_zh.md)
 
-A powerful command-line tool for browser automation, designed specifically for AI agents and automated workflows.
+A command-line tool for browser automation, designed for AI agents. Built with Go + Playwright.
 
-## Why Browser-CLI?
-
-- **AI-First Design** - Structured JSON output, clear command semantics, perfect for LLM integration
-- **Auto-Managed Server** - Browser server starts automatically when needed, no manual management
-- **Multi-Agent Support** - Isolated sessions for parallel agent execution
-- **Cookie Persistence** - Automatic cookie save/load, maintain login states
-- **Dialog Detection** - Detect and handle JavaScript dialogs with AI decision-making
-- **Cross-Browser** - Chromium, Firefox, WebKit support via Playwright
-
-## Installation
+**One command to control the browser — perfect for Codex, Claude Code, Cursor, and any AI coding assistant.**
 
 ```bash
-# Clone and build
+browser-cli navigate https://example.com
+browser-cli fill "#search" "browser automation"
+browser-cli click "button[type=submit]"
+browser-cli text
+```
+
+## Features
+
+- 🤖 **AI-First** — Structured JSON output, clear command semantics, auto-managed server
+- 🔒 **Session Isolation** — Each agent gets its own browser instance via `--session`
+- 🍪 **Cookie Persistence** — Auto save/load, login states preserved across sessions
+- 🌐 **Proxy Support** — `--proxy http://host:port` for network-restricted environments
+- 🎯 **Web Components** — `smart-click` and `pick` for custom elements and Shadow DOM
+- ⌨️ **Full Keyboard** — Shortcuts, combos, Tab/Enter/Escape, Ctrl+A/C/V
+- 📄 **PDF & Screenshot** — Export pages as PDF or PNG
+- 📁 **File Upload** — Upload files to any `<input type="file">`
+
+## Quick Install
+
+```bash
+# Clone and build (requires Go 1.21+)
 git clone https://github.com/zmysysz/browser-cli
 cd browser-cli
 make build
@@ -24,33 +35,80 @@ make build
 # Install Playwright browsers (first time only)
 make setup-browsers
 
-# Install to system
+# Add to PATH
 make install
+
+# Or build without CGO (fully static binary)
+make build-static
 ```
+
+> **No CGO required.** Browser-CLI compiles with `CGO_ENABLED=0` and supports cross-compilation:
+> ```bash
+> CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/browser-cli.exe .
+> CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o bin/browser-cli-mac .
+> ```
+
+## 30-Second Setup for AI Agents
+
+### Claude Code
+
+Add to your project's `.claude/commands/browser.md` (or use the included one):
+
+```bash
+# Copy the included command file
+cp -r .claude/ ~/.claude/   # project-level
+```
+
+Then in Claude Code, just ask: *"Navigate to github.com and take a screenshot"*
+
+### OpenAI Codex
+
+Add the included skill file:
+
+```bash
+# Copy the included skill file
+cp -r .codex/ ~/.codex/
+```
+
+### Cursor / Windsurf / Any Agent
+
+Add `AGENTS.md` to your project root — it's automatically read by most AI coding tools:
+
+```bash
+# Already included in the repo
+# AGENTS.md is at the project root
+```
+
+### GAL (Global Agent Layer)
+
+```bash
+# Copy the skill to your GAL skills directory
+cp -r skills/browser-cli/ ~/.gal/skills/
+```
+
+> 📁 All integration files are included in the repo: `skills/`, `.claude/`, `.codex/`, `AGENTS.md`
 
 ## Quick Start
 
-### Simple Commands (Auto Server Management)
-
-The browser server starts automatically when you run any command:
+The browser server starts automatically — just run commands:
 
 ```bash
-# Navigate - server auto-starts
+# Navigate (server auto-starts)
 browser-cli navigate https://example.com
 
-# Take screenshot - uses existing server
-browser-cli screenshot /tmp/page.png
+# Interact
+browser-cli fill "#username" "user"
+browser-cli click "button[type=submit]"
 
-# Extract text
+# Extract
 browser-cli text
+browser-cli screenshot page.png
 
-# Stop server when done
+# Done
 browser-cli stop
 ```
 
-### Run Command (Multi-step Operations)
-
-Execute multiple actions in a single command:
+### Multi-step in One Command
 
 ```bash
 browser-cli run "navigate https://example.com; click a; text"
@@ -65,11 +123,12 @@ browser-cli run "navigate https://example.com; click a; text"
 --headless        Headless mode (default: true)
 --timeout, -t     Timeout duration (default: 30s)
 --output, -o      Output format: json, markdown (default: markdown)
---session, -s     Session ID for isolated browser instance (required)
---proxy           Proxy server URL (e.g. http://proxy.example.com:8080 or socks5://proxy:1080)
+--session, -s     Session ID for isolated browser instance
+--proxy           Proxy server URL (e.g. http://proxy:8080 or socks5://proxy:1080)
+--idle-timeout    Auto-shutdown after idle period (default: 1h, 0 to disable)
 ```
 
-### Navigation Commands
+### Navigation
 
 | Command | Description |
 |---------|-------------|
@@ -78,163 +137,50 @@ browser-cli run "navigate https://example.com; click a; text"
 | `forward` | Go forward in history |
 | `reload` | Reload current page |
 
-### Interaction Commands
+### Interaction
 
 | Command | Description |
 |---------|-------------|
 | `click <selector>` | Click element |
 | `click-js <selector>` | Click using JavaScript (bypasses visibility checks) |
-| `smart-click <selector>` | Intelligently click Web Components (auto-detects internal methods) |
-| `hover <selector>` | Hover over element (shows virtual cursor) |
+| `smart-click <selector>` | Click Web Components (auto-detects internal methods) |
+| `hover <selector>` | Hover over element |
 | `fill <selector> <value>` | Fill input field |
 | `type <selector> <text>` | Type text character by character |
 | `select <selector> <value>` | Select dropdown option |
-| `eval <script>` | Execute JavaScript |
-| `pick <x> <y> [--depth=N]` | Pick element at coordinates, return DOM hierarchy and methods |
-| `right-click <selector>` | Right-click element (context menu) |
+| `right-click <selector>` | Right-click (context menu) |
 | `dblclick <selector>` | Double-click element |
+| `keyboard <key>` | Press key/combo (e.g. `Ctrl+A`, `Enter`, `Tab`) |
 | `upload <selector> <file>` | Upload file to file input |
-| `keyboard <key>` | Press keyboard key/combo (e.g. Ctrl+A, Enter) |
+| `eval <script>` | Execute JavaScript |
 
-### Web Component Support
-
-Browser-CLI provides special commands for handling Web Components (custom elements):
-
-#### `smart-click` - Auto-detect and click Web Components
-
-Web Components often use internal callback functions instead of standard DOM events. `smart-click` automatically detects and calls these methods:
-
-```bash
-# Works with custom elements like <custom-button>, <xhs-publish-btn>
-browser-cli smart-click "custom-button"
-browser-cli smart-click "[data-action=publish]"
-```
-
-Detection patterns: `_on*`, `_handle*`, `handle*`, `_click`, `_submit`, `_action`
-
-#### `pick` - Discover element internals
-
-Use `pick` to inspect elements at specific coordinates and discover their internal structure:
-
-```bash
-# Pick element at coordinates (from screenshot)
-browser-cli pick 500 300 --depth=5
-
-# Returns:
-{
-  "target": {
-    "tagName": "CUSTOM-BUTTON",
-    "selector": "custom-button",
-    "methods": ["_onClick", "_onPublish"],  // Detected callable methods!
-    "attributes": {"data-action": "publish"}
-  },
-  "ancestors": [
-    {"level": 1, "tagName": "DIV", "selector": ".toolbar", "children": ["custom-button", "save-btn"]}
-  ],
-  "shadowDOM": {"host": "custom-button", "children": ["button.internal"]},
-  "suggestions": ["Web Component detected: try smart-click"]
-}
-```
-
-Use cases:
-- Discover internal methods like `_onPublish` on Web Components
-- Find correct selector for nested elements
-- Understand Shadow DOM structure
-- Debug why `click()` doesn't work on custom elements
-
-## File Upload
-
-Upload files to file input elements:
-
-```bash
-# Upload a single file
-browser-cli upload "#file-input" ./document.pdf
-
-# Upload to a specific input type
-browser-cli upload "input[type=file]" /tmp/image.png
-```
-
-## PDF Export
-
-Save the current page as a PDF file (Chromium only):
-
-```bash
-# Save as PDF with default settings (A4, portrait)
-browser-cli pdf
-
-# Custom output path
-browser-cli pdf report.pdf
-
-# Landscape orientation and Letter format
-browser-cli pdf --landscape --format Letter page.pdf
-```
-
-## Keyboard Shortcuts
-
-Press keyboard keys and key combinations:
-
-```bash
-# Single keys
-browser-cli keyboard "Enter"
-browser-cli keyboard "Escape"
-browser-cli keyboard "Tab"
-
-# Key combinations
-browser-cli keyboard "Ctrl+A"        # Select all
-browser-cli keyboard "Ctrl+C"        # Copy
-browser-cli keyboard "Ctrl+V"        # Paste
-browser-cli keyboard "Ctrl+Shift+I"  # DevTools
-```
-
-### Supported Keys
-
-| Category | Keys |
-|----------|------|
-| Single | Enter, Escape, Tab, Backspace, Delete, Space |
-| Modifiers | Ctrl+, Alt+, Shift+, Meta+ |
-| Arrows | ArrowUp, ArrowDown, ArrowLeft, ArrowRight |
-| Function | F1-F12 |
-
-## Advanced Click
-
-Beyond the basic `click` command, Browser-CLI supports right-click and double-click:
-
-```bash
-# Right-click to open context menu
-browser-cli right-click "#menu-item"
-browser-cli right-click ".context-target"
-
-# Double-click to select or activate
-browser-cli dblclick "#item"
-browser-cli dblclick "td.editable"
-```
-
-### Extraction Commands
+### Extraction
 
 | Command | Description |
 |---------|-------------|
-| `screenshot [path]` | Take screenshot |
 | `text` | Extract page text |
+| `screenshot [path]` | Take screenshot |
 | `elements <selector>` | Find elements |
-| `pdf [file]` | Save page as PDF (Chromium only, flags: --landscape, --format) |
+| `pdf [file]` | Save as PDF (Chromium only, flags: `--landscape`, `--format`) |
 
-### Utility Commands
+### Utility
 
 | Command | Description |
 |---------|-------------|
-| `wait <selector>` | Wait for element |
-| `scroll <direction>` | Scroll page (up/down) |
+| `wait <selector>` | Wait for element to appear |
+| `scroll <up\|down>` | Scroll page |
+| `pick <x> <y> [--depth=N]` | Inspect element at coordinates, return DOM hierarchy |
 
-### Tab Commands
+### Tabs
 
 | Command | Description |
 |---------|-------------|
 | `tab-new` | Create new tab |
-| `tab-switch <id>` | Switch to tab |
 | `tab-list` | List all tabs |
+| `tab-switch <id>` | Switch to tab |
 | `tab-close [id]` | Close tab |
 
-### Dialog Commands
+### Dialogs
 
 | Command | Description |
 |---------|-------------|
@@ -242,31 +188,33 @@ browser-cli dblclick "td.editable"
 | `dialog-accept [value]` | Accept dialog |
 | `dialog-dismiss` | Dismiss dialog |
 
-### Server Commands
-
-| Command | Description |
-|---------|-------------|
-| `server` | Start server manually (foreground) |
-| `status` | Check server status |
-| `stop` | Stop server and save cookies |
-| `session-list` | List all active sessions |
-
-### Cookie Commands
+### Cookies & Sessions
 
 | Command | Description |
 |---------|-------------|
 | `cookie list` | List saved cookies |
-| `cookie clear [domain]` | Clear cookies |
+| `cookie clear [domain]` | Clear cookies for domain |
 | `cookie clear --all` | Clear all cookies |
+| `session-list` | List active sessions |
+| `stop` | Stop server (cookies auto-saved) |
+
+## Selector Syntax
+
+| Type | Example | Description |
+|------|---------|-------------|
+| CSS | `#username`, `input[name=email]` | Standard CSS selector |
+| Text | `text=Submit` | Element containing text |
+| Role | `role=button` | ARIA role selector |
+| XPath | `xpath=//div[@id="main"]` | XPath expression |
 
 ## Multi-Session Support
 
-Run multiple isolated browser sessions for parallel agent execution:
+Run isolated browser sessions for parallel agent execution:
 
 ```bash
-# Each session has independent browser instance
-browser-cli --session agent-1 navigate https://example.com
-browser-cli --session agent-2 navigate https://google.com
+# Each session gets its own browser instance
+browser-cli --session agent-1 navigate https://site1.com
+browser-cli --session agent-2 navigate https://site2.com
 
 # List all sessions
 browser-cli session-list
@@ -275,78 +223,54 @@ browser-cli session-list
 browser-cli --session agent-1 stop
 ```
 
-### Session Isolation
+## Web Component Support
 
-Each session has:
-- Independent browser instance
-- Independent tab management
-- Shared cookie storage (login states preserved)
+### `smart-click` — Click Web Components
 
-## Cookie Management
-
-Cookies are automatically saved and loaded, maintaining login states across sessions:
+Web Components often use internal callbacks instead of standard DOM events. `smart-click` auto-detects and calls them:
 
 ```bash
-# View saved cookies
-browser-cli cookie list
-
-# Clear cookies for a domain
-browser-cli cookie clear example.com
-
-# Clear all cookies
-browser-cli cookie clear --all
+browser-cli smart-click "custom-button"
+browser-cli smart-click "[data-action=publish]"
 ```
 
-### Cookie Storage
+Detection patterns: `_on*`, `_handle*`, `handle*`, `_click`, `_submit`, `_action`
 
-Cookies are stored in `/tmp/browser-cli/cookies/<domain>.json`
+### `pick` — Discover Element Internals
+
+Inspect elements at specific coordinates and discover their structure:
+
+```bash
+browser-cli pick 500 300 --depth=5
+```
+
+Returns tag name, selector, detected methods, Shadow DOM structure, and suggestions.
 
 ## Dialog Detection
 
 Browser-CLI detects JavaScript dialogs and lets AI decide how to handle them:
 
 ```bash
-# Check for pending dialog
 browser-cli dialog-status
-# Returns: {"dialog": {"type": "confirm", "message": "Are you sure?"}}
+# → {"dialog": {"type": "confirm", "message": "Are you sure?"}}
 
-# Accept dialog
-browser-cli dialog-accept
-
-# Dismiss dialog
-browser-cli dialog-dismiss
-
-# Accept prompt with value
-browser-cli dialog-accept "user input"
+browser-cli dialog-accept     # Accept
+browser-cli dialog-dismiss    # Dismiss
 ```
 
-### Supported Dialog Types
+Supported types: `alert`, `confirm`, `prompt`, `beforeunload`
 
-| Type | Description |
-|------|-------------|
-| `alert` | Simple alert, can only accept |
-| `confirm` | Yes/No dialog, accept or dismiss |
-| `prompt` | Input dialog, accept with value |
-| `beforeunload` | Page leave confirmation |
+> Note: Custom HTML popups are not detected — use element selectors instead.
 
-Note: Custom HTML popups (like privacy policy dialogs) are not detected. Use element selectors to handle them.
+## Output Format
 
-## Output Formats
-
-### JSON (Recommended for AI)
+### JSON (recommended for AI agents)
 
 ```json
-{
-  "command": "navigate",
-  "status": "success",
-  "data": {
-    "url": "https://example.com/",
-    "title": "Example Domain"
-  }
-}
+{"command": "navigate", "status": "success", "data": {"url": "https://example.com/", "title": "Example Domain"}}
 ```
 
-### Markdown (Human-readable)
+### Markdown (human-readable)
 
 ```
 ## Navigate
@@ -355,49 +279,49 @@ Note: Custom HTML popups (like privacy policy dialogs) are not detected. Use ele
 - Title: Example Domain
 ```
 
-## Selector Syntax
+## AI Integration Guide
 
-Browser-CLI supports multiple selector formats:
+### Integration Files Included
 
-| Selector | Example | Description |
-|----------|---------|-------------|
-| CSS | `#username` | CSS selector |
-| Text | `text=Submit` | Element containing text |
-| Role | `role=button` | Element by ARIA role |
-| XPath | `xpath=//div[@id="main"]` | XPath selector |
+| File | Tool | Description |
+|------|------|-------------|
+| `skills/browser-cli/SKILL.md` | GAL | Full skill definition with patterns |
+| `.claude/commands/browser.md` | Claude Code | Custom slash command |
+| `.codex/skills/browser-cli.md` | OpenAI Codex | Skill reference |
+| `AGENTS.md` | Cursor, Windsurf, etc. | Agent instructions |
 
-## AI Integration Best Practices
+### Best Practices for AI Agents
 
-1. **Auto Server** - Server starts automatically, just run commands
-2. **Use JSON Output** - Parse results programmatically with `--output json`
-3. **Check Status Field** - "success" or "error" for each operation
-4. **Handle Dialogs** - Check `dialog-status` before proceeding
-5. **Use Sessions** - Isolate parallel agent tasks with `--session`
-6. **Preserve Login** - Cookies auto-save, login states persist
+1. **Server auto-starts** — Just run commands, no manual server management
+2. **Use `--output json`** — Structured output for reliable parsing
+3. **Check `status` field** — Always `"success"` or `"error"`
+4. **Handle dialogs** — Check `dialog-status` after clicks that may trigger alerts
+5. **Use `--session`** — Isolate parallel agent tasks
+6. **Call `stop` when done** — Clean up browser resources
+7. **Use `--proxy`** — If behind a firewall, pass proxy URL explicitly
+8. **Use `smart-click`** — When normal `click` doesn't work on custom elements
 
-### Example AI Workflow
+### Example: AI Agent Workflow
 
 ```bash
-# 1. Navigate and login (server auto-starts)
+# 1. Navigate and login
 browser-cli navigate https://login.example.com
 browser-cli fill "#username" "user"
 browser-cli fill "#password" "pass"
 browser-cli click "button[type=submit]"
 
-# 2. Wait for login
+# 2. Wait for page load
 browser-cli wait ".dashboard"
 
-# 3. Press keyboard shortcut
-browser-cli keyboard "Enter"
-
-# 4. Check for dialogs
-browser-cli dialog-status
-
-# 5. Extract data
+# 3. Extract data
 browser-cli text
-browser-cli screenshot result.png
+browser-cli eval "JSON.stringify(Array.from(document.querySelectorAll('.item')).map(e=>e.textContent))"
 
-# 6. Stop server (cookies auto-saved)
+# 4. Export
+browser-cli screenshot result.png
+browser-cli pdf report.pdf
+
+# 5. Cleanup
 browser-cli stop
 ```
 
@@ -411,7 +335,7 @@ browser-cli stop
 ## Requirements
 
 - Go 1.21+
-- Playwright browsers (installed via `make setup-browsers`)
+- Playwright browsers (`make setup-browsers`)
 
 ## License
 
