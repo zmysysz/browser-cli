@@ -52,41 +52,41 @@ make build-static
 
 ### Claude Code
 
-Add to your project's `.claude/commands/browser.md` (or use the included one):
+Copy the integration file to your project:
 
 ```bash
-# Copy the included command file
-cp -r .claude/ ~/.claude/   # project-level
+# Project-level (recommended)
+mkdir -p .claude/commands/
+cp integrations/claude/browser.md .claude/commands/
+
+# Or user-level (all projects)
+mkdir -p ~/.claude/commands/
+cp integrations/claude/browser.md ~/.claude/commands/
 ```
 
 Then in Claude Code, just ask: *"Navigate to github.com and take a screenshot"*
 
 ### OpenAI Codex
 
-Add the included skill file:
+Copy the skill file:
 
 ```bash
-# Copy the included skill file
-cp -r .codex/ ~/.codex/
+# User-level
+mkdir -p ~/.codex/skills/
+cp integrations/codex/browser-cli.md ~/.codex/skills/
 ```
 
 ### Cursor / Windsurf / Any Agent
 
-Add `AGENTS.md` to your project root — it's automatically read by most AI coding tools:
-
-```bash
-# Already included in the repo
-# AGENTS.md is at the project root
-```
+`AGENTS.md` is at the project root — most AI coding tools read it automatically.
 
 ### GAL (Global Agent Layer)
 
 ```bash
-# Copy the skill to your GAL skills directory
 cp -r skills/browser-cli/ ~/.gal/skills/
 ```
 
-> 📁 All integration files are included in the repo: `skills/`, `.claude/`, `.codex/`, `AGENTS.md`
+> 📁 Integration templates are in `integrations/` — copy them to the tool's config directory.
 
 ## Quick Start
 
@@ -286,8 +286,8 @@ Supported types: `alert`, `confirm`, `prompt`, `beforeunload`
 | File | Tool | Description |
 |------|------|-------------|
 | `skills/browser-cli/SKILL.md` | GAL | Full skill definition with patterns |
-| `.claude/commands/browser.md` | Claude Code | Custom slash command |
-| `.codex/skills/browser-cli.md` | OpenAI Codex | Skill reference |
+| `integrations/claude/browser.md` | Claude Code | Custom slash command (copy to `.claude/commands/`) |
+| `integrations/codex/browser-cli.md` | OpenAI Codex | Skill reference (copy to `~/.codex/skills/`) |
 | `AGENTS.md` | Cursor, Windsurf, etc. | Agent instructions |
 
 ### Best Practices for AI Agents

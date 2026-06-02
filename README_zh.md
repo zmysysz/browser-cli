@@ -52,25 +52,33 @@ make build-static
 
 ### Claude Code
 
-将项目中的 `.claude/commands/browser.md` 复制到你的项目：
+将集成文件复制到你的项目：
 
 ```bash
-cp -r .claude/ ~/.claude/   # 项目级别
+# 项目级别（推荐）
+mkdir -p .claude/commands/
+cp integrations/claude/browser.md .claude/commands/
+
+# 或用户级别（所有项目通用）
+mkdir -p ~/.claude/commands/
+cp integrations/claude/browser.md ~/.claude/commands/
 ```
 
 然后在 Claude Code 中直接说：*"Navigate to github.com and take a screenshot"*
 
 ### OpenAI Codex
 
-将项目中的 skill 文件复制：
+复制 skill 文件：
 
 ```bash
-cp -r .codex/ ~/.codex/
+# 用户级别
+mkdir -p ~/.codex/skills/
+cp integrations/codex/browser-cli.md ~/.codex/skills/
 ```
 
 ### Cursor / Windsurf / 任意 Agent
 
-`AGENTS.md` 已放在项目根目录，大多数 AI 编程工具会自动读取。
+`AGENTS.md` 在项目根目录 — 大多数 AI 编程工具会自动读取。
 
 ### GAL（Global Agent Layer）
 
@@ -78,7 +86,7 @@ cp -r .codex/ ~/.codex/
 cp -r skills/browser-cli/ ~/.gal/skills/
 ```
 
-> 📁 所有集成文件已包含在仓库中：`skills/`、`.claude/`、`.codex/`、`AGENTS.md`
+> 📁 集成模板在 `integrations/` 目录 — 复制到对应工具的配置目录即可。
 
 ## 快速开始
 
@@ -278,8 +286,8 @@ browser-cli dialog-dismiss    # 关闭
 | 文件 | 工具 | 说明 |
 |------|------|------|
 | `skills/browser-cli/SKILL.md` | GAL | 完整 skill 定义和使用模式 |
-| `.claude/commands/browser.md` | Claude Code | 自定义斜杠命令 |
-| `.codex/skills/browser-cli.md` | OpenAI Codex | Skill 参考文档 |
+| `integrations/claude/browser.md` | Claude Code | 自定义斜杠命令（复制到 `.claude/commands/`） |
+| `integrations/codex/browser-cli.md` | OpenAI Codex | Skill 参考文档（复制到 `~/.codex/skills/`） |
 | `AGENTS.md` | Cursor, Windsurf 等 | Agent 指令文件 |
 
 ### AI Agent 最佳实践
