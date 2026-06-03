@@ -5,25 +5,21 @@ import (
 	"os"
 	"time"
 
-	"github.com/browser-cli/internal/output"
 	"github.com/spf13/cobra"
 )
 
 var (
 	// Global flags
-	browserType   string
-	headless      bool
-	timeout       time.Duration
-	outputFmt     string
-	sessionID     string
-	proxy         string
-	idleTimeout   time.Duration
+	browserType string
+	headless    bool
+	timeout     time.Duration
+	outputFmt   string
+	sessionID   string
+	proxy       string
+	idleTimeout time.Duration
 
 	// Version
 	version string
-
-	// Output formatter
-	formatter *output.Formatter
 )
 
 // Execute runs the root command
@@ -65,8 +61,8 @@ OUTPUT:
   browser-cli --output json navigate https://example.com
 `,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Initialize formatter
-		formatter = output.NewFormatter(output.Format(outputFmt))
+		// Reserved for future global setup (e.g. structured logger binding).
+		_, _, _ = cmd, args, outputFmt
 	},
 }
 

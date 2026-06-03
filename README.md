@@ -329,8 +329,8 @@ browser-cli stop
 
 | Resource | Path |
 |----------|------|
-| Cookies | `/tmp/browser-cli/cookies/<domain>.json` |
-| Sessions | `/tmp/browser-cli/sessions/<session-id>/server.sock` |
+| Server socket | `/tmp/browser-cli/server.sock` (single socket for all sessions) |
+| Cookies | `/tmp/browser-cli/cookies/<session-id>/<domain>.json` (per session, per domain) |
 
 ## Requirements
 

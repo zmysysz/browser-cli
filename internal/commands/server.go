@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,33 +22,6 @@ var (
 	serverSocket      string
 	serverIdleTimeout time.Duration
 )
-
-// printSuccess prints a success result
-func printSuccess(cmd string, data interface{}) {
-	output := map[string]interface{}{
-		"command": cmd,
-		"status":  "success",
-	}
-	if data != nil {
-		output["data"] = data
-	}
-	output["session"] = sessionID
-	dataBytes, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(dataBytes))
-}
-
-// printError prints an error result
-func printError(cmd string, err error) {
-	output := map[string]interface{}{
-		"command": cmd,
-		"status":  "error",
-		"error":   err.Error(),
-	}
-	output["session"] = sessionID
-	dataBytes, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(dataBytes))
-	os.Exit(1)
-}
 
 // serverCmd represents the server command (foreground, for manual use)
 var serverCmd = &cobra.Command{
@@ -165,8 +140,10 @@ EXAMPLES:
   browser-cli tab-switch 3`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		var tabID int
-		fmt.Sscanf(args[0], "%d", &tabID)
+		tabID, err := strconv.Atoi(strings.TrimSpace(args[0]))
+		if err != nil {
+			return fmt.Errorf("tab-switch: %q is not a valid tab ID: %w", args[0], err)
+		}
 		return sendCommand("tab_switch", map[string]interface{}{"tab_id": tabID})
 	},
 }
@@ -205,9 +182,13 @@ EXAMPLES:
   browser-cli tab-close 2      # Close tab with ID 2`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		tabID := 0
+		var tabID int
 		if len(args) > 0 {
-			fmt.Sscanf(args[0], "%d", &tabID)
+			id, err := strconv.Atoi(strings.TrimSpace(args[0]))
+			if err != nil {
+				return fmt.Errorf("tab-close: %q is not a valid tab ID: %w", args[0], err)
+			}
+			tabID = id
 		}
 		return sendCommand("tab_close", map[string]interface{}{"tab_id": tabID})
 	},

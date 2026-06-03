@@ -17,7 +17,7 @@ The browser server is auto-started if not running.
 
 ACTION SYNTAX:
   Actions are separated by semicolons (;). Each action is a command with arguments.
-  
+
   Example: "navigate https://example.com; click #btn; text"
 
 SUPPORTED ACTIONS:
@@ -37,7 +37,7 @@ SUPPORTED ACTIONS:
   keyboard <key>          - Press keyboard key/combo (e.g., Ctrl+A)
   right-click <selector>  - Right-click element
   dblclick <selector>     - Double-click element
-  sleep <duration>        - Sleep for manual operations (e.g., 30s, 1m)
+  sleep <duration>        - Sleep for the given duration (e.g. 30s, 1m)
   back / forward / reload - Navigation controls
 
 EXAMPLES:
@@ -49,13 +49,21 @@ EXAMPLES:
 		actionsStr := args[0]
 		actions := parseActions(actionsStr)
 
-		// Convert to server format
+		// Convert to server format. Parse errors are reported on stderr but do
+		// not abort the whole pipeline: the run is a batch and one bad entry
+		// shouldn't take down the rest.
 		actionList := make([]map[string]interface{}, 0)
 		for _, action := range actions {
-			parsed := parseActionToMap(action)
-			if parsed != nil {
-				actionList = append(actionList, parsed)
+			parsed, err := parseActionToMap(action)
+			if err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "run: skipping action %q: %v\n", action, err)
+				continue
 			}
+			actionList = append(actionList, parsed)
+		}
+
+		if len(actionList) == 0 {
+			return fmt.Errorf("no valid actions to execute")
 		}
 
 		return sendCommand("run", map[string]interface{}{
@@ -135,17 +143,25 @@ func findEvalEnd(s string) int {
 	return len(s)
 }
 
-func parseActionToMap(action string) map[string]interface{} {
+// parseActionToMap converts a single action string into a Command-shaped map.
+// Returns an error (instead of embedding an "error" field in the map, which
+// callers used to ignore) so parse problems are reported to the user.
+func parseActionToMap(action string) (map[string]interface{}, error) {
 	parts := strings.Fields(action)
 	if len(parts) == 0 {
-		return nil
+		return nil, fmt.Errorf("empty action")
 	}
 
 	cmdName := parts[0]
 	args := parts[1:]
 
-	// Handle quoted arguments
-	args = parseQuotedArgs(args)
+	// Handle quoted arguments. parseQuotedArgs only fails on unterminated
+	// quotes, which is a programmer error in the action string — fail the
+	// whole action with a useful message rather than silently truncating.
+	args, err := parseQuotedArgs(args)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", cmdName, err)
+	}
 
 	result := map[string]interface{}{
 		"action": cmdName,
@@ -157,42 +173,26 @@ func parseActionToMap(action string) map[string]interface{} {
 	switch cmdName {
 	case "navigate":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "navigate requires URL",
-			}
+			return nil, fmt.Errorf("navigate requires URL")
 		}
 		params["url"] = args[0]
 
 	case "click":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "click requires selector",
-			}
+			return nil, fmt.Errorf("click requires selector")
 		}
 		params["selector"] = args[0]
 
 	case "fill":
 		if len(args) < 2 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "fill requires selector and value",
-			}
+			return nil, fmt.Errorf("fill requires selector and value")
 		}
 		params["selector"] = args[0]
 		params["value"] = args[1]
 
 	case "type":
 		if len(args) < 2 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "type requires selector and text",
-			}
+			return nil, fmt.Errorf("type requires selector and text")
 		}
 		params["selector"] = args[0]
 		params["text"] = args[1]
@@ -200,11 +200,7 @@ func parseActionToMap(action string) map[string]interface{} {
 
 	case "select":
 		if len(args) < 2 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "select requires selector and value",
-			}
+			return nil, fmt.Errorf("select requires selector and value")
 		}
 		params["selector"] = args[0]
 		params["value"] = args[1]
@@ -221,31 +217,19 @@ func parseActionToMap(action string) map[string]interface{} {
 
 	case "elements":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "elements requires selector",
-			}
+			return nil, fmt.Errorf("elements requires selector")
 		}
 		params["selector"] = args[0]
 
 	case "eval":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "eval requires JavaScript",
-			}
+			return nil, fmt.Errorf("eval requires JavaScript")
 		}
 		params["script"] = strings.Join(args, " ")
 
 	case "wait":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "wait requires selector",
-			}
+			return nil, fmt.Errorf("wait requires selector")
 		}
 		params["selector"] = args[0]
 
@@ -259,11 +243,7 @@ func parseActionToMap(action string) map[string]interface{} {
 
 	case "upload":
 		if len(args) < 2 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "upload requires selector and file path",
-			}
+			return nil, fmt.Errorf("upload requires selector and file path")
 		}
 		params["selector"] = args[0]
 		params["path"] = args[1]
@@ -279,61 +259,49 @@ func parseActionToMap(action string) map[string]interface{} {
 
 	case "keyboard":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "keyboard requires key",
-			}
+			return nil, fmt.Errorf("keyboard requires key")
 		}
 		params["key"] = args[0]
 
 	case "right-click":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "right-click requires selector",
-			}
+			return nil, fmt.Errorf("right-click requires selector")
 		}
 		params["selector"] = args[0]
 
 	case "dblclick":
 		if len(args) < 1 {
-			return map[string]interface{}{
-				"action": cmdName,
-				"params": map[string]interface{}{},
-				"error":  "dblclick requires selector",
-			}
+			return nil, fmt.Errorf("dblclick requires selector")
 		}
 		params["selector"] = args[0]
 
 	case "sleep":
-		// Sleep is handled client-side, not sent to server
+		// Sleep runs server-side so that the wait happens inside the same
+		// session's action queue, not on the client (where it would race
+		// with the next request already in flight to the server).
 		duration := 30 * time.Second
 		if len(args) > 0 {
-			if d, err := time.ParseDuration(args[0]); err == nil {
-				duration = d
+			d, err := time.ParseDuration(args[0])
+			if err != nil {
+				return nil, fmt.Errorf("sleep: invalid duration %q: %w", args[0], err)
 			}
+			duration = d
 		}
-		time.Sleep(duration)
-		return nil // Skip sending to server
+		params["duration_ms"] = duration.Milliseconds()
 
 	case "back", "forward", "reload":
 		// No params needed
 
 	default:
-		return map[string]interface{}{
-			"action": cmdName,
-			"params": map[string]interface{}{},
-			"error":  fmt.Sprintf("unknown action: %s", cmdName),
-		}
+		return nil, fmt.Errorf("unknown action: %s", cmdName)
 	}
 
-	return result
+	return result, nil
 }
 
-// parseQuotedArgs handles quoted arguments like "hello world"
-func parseQuotedArgs(args []string) []string {
+// parseQuotedArgs handles quoted arguments like "hello world". An unterminated
+// quoted string now returns an error so that values aren't silently truncated.
+func parseQuotedArgs(args []string) ([]string, error) {
 	result := make([]string, 0)
 	i := 0
 	for i < len(args) {
@@ -350,7 +318,7 @@ func parseQuotedArgs(args []string) []string {
 				combined += " " + strings.TrimSuffix(args[i], string(quote))
 				i++
 			} else {
-				combined = strings.TrimSuffix(combined, string(quote))
+				return nil, fmt.Errorf("unterminated quoted argument starting with %q", arg)
 			}
 			result = append(result, combined)
 		} else {
@@ -358,7 +326,7 @@ func parseQuotedArgs(args []string) []string {
 			i++
 		}
 	}
-	return result
+	return result, nil
 }
 
 func init() {

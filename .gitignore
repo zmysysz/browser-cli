@@ -1,8 +1,11 @@
 # Project specific
 .gal/
 
-# Binaries
+# Build artifacts
 bin/
+dist/
+
+# Binaries
 *.exe
 *.exe~
 *.dll

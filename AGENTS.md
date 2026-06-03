@@ -61,6 +61,7 @@ browser-cli dialog-status | dialog-accept [value] | dialog-dismiss
 
 # Sessions
 browser-cli --session <id> <cmd>        # isolated session
+browser-cli run "<a1>; <a2>; <a3>"      # multi-step in one call
 browser-cli stop                        # cleanup
 ```
 
@@ -80,6 +81,7 @@ browser-cli stop                        # cleanup
 - `--proxy http://host:port` — proxy for network access
 - `--headless=false` — show browser window for debugging
 - `--timeout 60s` — operation timeout
+- `--idle-timeout 30m` — auto-shutdown server after idle (0 to disable)
 
 ### Typical Workflow
 

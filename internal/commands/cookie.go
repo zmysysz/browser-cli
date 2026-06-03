@@ -34,8 +34,8 @@ var cookieListCmd = &cobra.Command{
 OUTPUT:
   Returns a list of domains with their cookie count.
   Use --output json for structured data.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		sendCommand("cookie_list", nil)
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return sendCommand("cookie_list", nil)
 	},
 }
 
@@ -57,7 +57,7 @@ EXAMPLES:
   
   # Clear all cookies for current session
   browser-cli cookie clear --all`,
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		clearAll, _ := cmd.Flags().GetBool("all")
 
 		var domain string
@@ -66,8 +66,7 @@ EXAMPLES:
 		}
 
 		if domain == "" && !clearAll {
-			printError("cookie clear", fmt.Errorf("specify a domain or use --all"))
-			return
+			return fmt.Errorf("specify a domain or use --all")
 		}
 
 		params := map[string]interface{}{
@@ -77,7 +76,7 @@ EXAMPLES:
 			params["domain"] = domain
 		}
 
-		sendCommand("cookie_clear", params)
+		return sendCommand("cookie_clear", params)
 	},
 }
 

@@ -329,8 +329,8 @@ browser-cli stop
 
 | 资源 | 路径 |
 |------|------|
-| Cookie | `/tmp/browser-cli/cookies/<domain>.json` |
-| 会话 | `/tmp/browser-cli/sessions/<session-id>/server.sock` |
+| Server socket | `/tmp/browser-cli/server.sock`（所有会话共用一个 socket） |
+| Cookie | `/tmp/browser-cli/cookies/<session-id>/<domain>.json`（按 session、按 domain 分文件） |
 
 ## 系统要求
 
