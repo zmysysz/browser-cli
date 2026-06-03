@@ -153,6 +153,7 @@ browser-cli run "navigate https://example.com; click a; text"
 | `keyboard <key>` | Press key/combo (e.g. `Ctrl+A`, `Enter`, `Tab`) |
 | `upload <selector> <file>` | Upload file to file input |
 | `eval <script>` | Execute JavaScript |
+| `eval-file <path>` | Execute JavaScript read from a file (multi-line / quoted strings friendly) |
 
 ### Extraction
 

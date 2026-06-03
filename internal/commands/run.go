@@ -2,6 +2,7 @@ package commands
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -226,6 +227,20 @@ func parseActionToMap(action string) (map[string]interface{}, error) {
 			return nil, fmt.Errorf("eval requires JavaScript")
 		}
 		params["script"] = strings.Join(args, " ")
+
+	case "eval-file":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("eval-file requires a path")
+		}
+		data, err := os.ReadFile(args[0])
+		if err != nil {
+			return nil, fmt.Errorf("eval-file: read %q: %w", args[0], err)
+		}
+		// eval-file is a client-side convenience: the server only knows
+		// "eval". We swap the action name and pass the file contents in
+		// the same "script" field, so the server path is identical.
+		result["action"] = "eval"
+		params["script"] = string(data)
 
 	case "wait":
 		if len(args) < 1 {

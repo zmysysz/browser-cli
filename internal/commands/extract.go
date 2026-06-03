@@ -1,6 +1,9 @@
 package commands
 
 import (
+	"fmt"
+	"os"
+
 	"github.com/spf13/cobra"
 )
 
@@ -85,13 +88,51 @@ The browser server is auto-started if not running.
 ARGUMENTS:
   javascript - JavaScript expression or code to execute
 
+NOTES:
+  A JS expression that returns undefined will come back as
+  "value": null. If you want a stringified result, wrap with
+  JSON.stringify(...). For multi-line scripts read from a file,
+  use the eval-file command.
+
 EXAMPLES:
   browser-cli eval "document.title"
   browser-cli eval "document.querySelector('h1').textContent"
-  browser-cli eval "window.location.href"`,
+  browser-cli eval "window.location.href"
+  browser-cli eval "JSON.stringify(document.querySelectorAll('a').length)"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return sendCommand("eval", map[string]interface{}{"script": args[0]})
+	},
+}
+
+var evalFileCmd = &cobra.Command{
+	Use:   "eval-file <path>",
+	Short: "Execute JavaScript read from a file",
+	Long: `Read JavaScript from a file and execute it in the browser context.
+
+This is the recommended way to run multi-line scripts that contain
+single quotes, double quotes, or other characters that are awkward
+to escape on the command line.
+
+The browser server is auto-started if not running.
+
+ARGUMENTS:
+  path - Path to a UTF-8 file containing JavaScript
+
+NOTES:
+  The file is read verbatim — no template substitution. The same
+  return-value semantics as eval apply (undefined becomes null).
+
+EXAMPLES:
+  browser-cli eval-file extract.js
+  browser-cli eval-file ~/scripts/page-summary.js`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		data, err := os.ReadFile(args[0])
+		if err != nil {
+			return fmt.Errorf("eval-file: read %q: %w", args[0], err)
+		}
+		return sendCommand("eval", map[string]interface{}{"script": string(data)})
 	},
 }
 
@@ -100,4 +141,5 @@ func init() {
 	rootCmd.AddCommand(textCmd)
 	rootCmd.AddCommand(elementsCmd)
 	rootCmd.AddCommand(evalCmd)
+	rootCmd.AddCommand(evalFileCmd)
 }

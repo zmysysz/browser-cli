@@ -153,6 +153,7 @@ browser-cli run "navigate https://example.com; click a; text"
 | `keyboard <key>` | 按键/组合键（如 `Ctrl+A`、`Enter`、`Tab`） |
 | `upload <selector> <file>` | 上传文件 |
 | `eval <script>` | 执行 JavaScript |
+| `eval-file <path>` | 从文件读取并执行 JavaScript（适合多行 / 含引号的脚本） |
 
 ### 提取
 

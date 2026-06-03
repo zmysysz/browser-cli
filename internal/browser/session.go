@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/playwright-community/playwright-go"
 )
@@ -23,6 +24,16 @@ func NewSessionCookieStorage(sessionID string) *SessionCookieStorage {
 	return &SessionCookieStorage{basePath: basePath}
 }
 
+// safeDomain converts a cookie domain into something safe to use as a
+// filename. Real domains are usually fine ("example.com"), but cookies
+// can carry ports in their Domain field (e.g. "localhost:8080") and a
+// colon is not legal in filenames on Windows. We replace `:` with `_`.
+// The original domain is preserved inside the JSON payload, so list and
+// load still report the right thing.
+func safeDomain(domain string) string {
+	return strings.ReplaceAll(domain, ":", "_")
+}
+
 // SaveAll saves all cookies to storage (grouped by domain)
 func (cs *SessionCookieStorage) SaveAll(cookies []playwright.Cookie) error {
 	if len(cookies) == 0 {
@@ -40,7 +51,7 @@ func (cs *SessionCookieStorage) SaveAll(cookies []playwright.Cookie) error {
 	}
 
 	for domain, cookies := range domainCookies {
-		path := filepath.Join(cs.basePath, domain+".json")
+		path := filepath.Join(cs.basePath, safeDomain(domain)+".json")
 		data, err := json.MarshalIndent(cookies, "", "  ")
 		if err != nil {
 			return err
@@ -89,9 +100,9 @@ func (cs *SessionCookieStorage) Clear(domain string) error {
 		return nil
 	}
 
-	path := filepath.Join(cs.basePath, domain+".json")
+	path := filepath.Join(cs.basePath, safeDomain(domain)+".json")
 	os.Remove(path)
-	path = filepath.Join(cs.basePath, "."+domain+".json")
+	path = filepath.Join(cs.basePath, safeDomain("."+domain)+".json")
 	os.Remove(path)
 	return nil
 }
