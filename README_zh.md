@@ -197,7 +197,17 @@ browser-cli run "navigate https://example.com; click a; text"
 | `cookie clear [domain]` | 清除指定域名的 Cookie |
 | `cookie clear --all` | 清除所有 Cookie |
 | `session-list` | 列出活跃会话 |
+| `session-close` | 关闭当前会话（Cookie 自动保存） |
 | `stop` | 停止服务器（Cookie 自动保存） |
+
+### 批处理与服务器
+
+| 命令 | 说明 |
+|------|------|
+| `run '<json>'` | 一次往返中执行多个动作；`sleep <ms>` 在流程内被尊重 |
+| `server` | 前台运行服务器（阻塞） |
+| `server-start` | 后台启动服务器（立即返回） |
+| `status` | 查看服务器状态（运行中、会话数、上次活动、空闲超时） |
 
 ## 选择器语法
 

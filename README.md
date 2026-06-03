@@ -197,7 +197,17 @@ browser-cli run "navigate https://example.com; click a; text"
 | `cookie clear [domain]` | Clear cookies for domain |
 | `cookie clear --all` | Clear all cookies |
 | `session-list` | List active sessions |
+| `session-close` | Close the current session (cookies auto-saved) |
 | `stop` | Stop server (cookies auto-saved) |
+
+### Batch & Server
+
+| Command | Description |
+|---------|-------------|
+| `run '<json>'` | Execute multiple actions in one round-trip; `sleep <ms>` is honored inline |
+| `server` | Run server in the foreground (blocks) |
+| `server-start` | Start server in the background (returns immediately) |
+| `status` | Show server status (running, sessions, last activity, idle timeout) |
 
 ## Selector Syntax
 
