@@ -88,6 +88,8 @@ type Server struct {
 	browserType string
 	headless    bool
 	proxy       string
+	cdpEndpoint string   // non-empty = connected via CDP; don't close the browser on Stop
+	statePath   string   // path to storage state JSON for login reuse
 }
 
 // ServerConfig holds server configuration
@@ -97,6 +99,9 @@ type ServerConfig struct {
 	SocketPath  string
 	Proxy       string
 	IdleTimeout time.Duration
+	CDPEndpoint string // Connect to existing browser via CDP (e.g. http://localhost:9222)
+	Chrome      bool   // Use system-installed Google Chrome via Playwright's "chrome" channel
+	StatePath   string // Path to storage state JSON file (cookies + localStorage) for login reuse
 }
 
 // Command represents a command sent to the server
@@ -122,34 +127,69 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("failed to init playwright: %w", err)
 	}
 
-	// Launch browser
+	// Launch or connect to browser
 	var browser playwright.Browser
 	var proxyServer *playwright.Proxy
 	if cfg.Proxy != "" {
 		proxyServer = &playwright.Proxy{Server: cfg.Proxy}
 	}
 
-	switch cfg.Browser {
-	case "firefox":
-		browser, err = pw.Firefox.Launch(playwright.BrowserTypeLaunchOptions{
-			Headless: playwright.Bool(cfg.Headless),
-			Proxy:    proxyServer,
-		})
-	case "webkit":
-		browser, err = pw.WebKit.Launch(playwright.BrowserTypeLaunchOptions{
-			Headless: playwright.Bool(cfg.Headless),
-			Proxy:    proxyServer,
-		})
-	default:
-		browser, err = pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-			Headless: playwright.Bool(cfg.Headless),
-			Proxy:    proxyServer,
-			Args: []string{
+	if cfg.CDPEndpoint != "" {
+		// Connect to an existing browser via CDP — the browser is launched
+		// by the user (e.g. google-chrome --remote-debugging-port=9222),
+		// so it has a real profile, no automation flags, and passes
+		// Google's bot detection.
+		browser, err = pw.Chromium.ConnectOverCDP(cfg.CDPEndpoint)
+		if err != nil {
+			pw.Stop()
+			return nil, fmt.Errorf("failed to connect to CDP endpoint %s: %w", cfg.CDPEndpoint, err)
+		}
+		fmt.Printf("Connected to browser via CDP: %s\n", cfg.CDPEndpoint)
+	} else {
+		switch cfg.Browser {
+		case "firefox":
+			browser, err = pw.Firefox.Launch(playwright.BrowserTypeLaunchOptions{
+				Headless: playwright.Bool(cfg.Headless),
+				Proxy:    proxyServer,
+			})
+		case "webkit":
+			browser, err = pw.WebKit.Launch(playwright.BrowserTypeLaunchOptions{
+				Headless: playwright.Bool(cfg.Headless),
+				Proxy:    proxyServer,
+			})
+		default:
+			// Build Chromium launch args. Anti-detection flags
+			// (--disable-blink-features=AutomationControlled, etc.) come from
+			// stealthChromiumArgs() so they live in one place.
+			chromiumArgs := append([]string{
 				"--no-sandbox",
 				"--disable-extensions",
 				"--disable-default-apps",
-			},
-		})
+				// /dev/shm is read-only in the sandbox; force Chrome to
+				// use /tmp for shared memory instead.
+				"--disable-dev-shm-usage",
+			}, stealthChromiumArgs()...)
+
+			launchOpts := playwright.BrowserTypeLaunchOptions{
+				Headless: playwright.Bool(cfg.Headless),
+				Proxy:    proxyServer,
+				Args:     chromiumArgs,
+				// Drop the "enable-automation" switch that adds the
+				// "Chrome is being controlled by automated test software"
+				// infobar and sets the AutomationControlled signal.
+				IgnoreDefaultArgs: []string{"--enable-automation"},
+			}
+
+			// When Chrome=true, use Playwright's "chrome" channel so it
+			// launches the system-installed Google Chrome (binary
+			// signature is verified; not Playwright's custom build).
+			// This is what defeats Google's binary-fingerprint detection.
+			if cfg.Chrome {
+				launchOpts.Channel = playwright.String("chrome")
+			}
+
+			browser, err = pw.Chromium.Launch(launchOpts)
+		}
 	}
 	if err != nil {
 		pw.Stop()
@@ -194,6 +234,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		browserType:  cfg.Browser,
 		headless:     cfg.Headless,
 		proxy:        cfg.Proxy,
+		cdpEndpoint:  cfg.CDPEndpoint,
+		statePath:    cfg.StatePath,
 	}
 	server.running.Store(true)
 	server.lastActivityUnixNano.Store(time.Now().UnixNano())
@@ -440,13 +482,40 @@ func (s *Server) getSession(sessionID string) (*SessionState, error) {
 // buildSession does the slow work of creating a BrowserContext,
 // loading cookies, and making the first page. Called only from
 // getSession's slow path.
+//
+// The BrowserContext is created with anti-detection options
+// (realistic UA, locale, viewport) and an init script that patches
+// navigator.webdriver, plugins, chrome, permissions, and other
+// automation fingerprints.
 func (s *Server) buildSession(sessionID string) (*SessionState, error) {
-	context, err := s.browser.NewContext()
+	// Use stealth-optimised context options
+	contextOpts := stealthContextOptions()
+
+	// If a storage state file is configured, load it so the session
+	// starts with the saved cookies + localStorage (e.g. a Google
+	// login performed manually via "browser-cli login").
+	if s.statePath != "" {
+		if _, err := os.Stat(s.statePath); err == nil {
+			contextOpts.StorageStatePath = playwright.String(s.statePath)
+			fmt.Printf("Loading storage state from %s\n", s.statePath)
+		} else {
+			fmt.Printf("Warning: storage state file %s not found, starting fresh\n", s.statePath)
+		}
+	}
+
+	context, err := s.browser.NewContext(contextOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create context for session %s: %w", sessionID, err)
 	}
 
-	// Auto-load saved cookies for this session
+	// Inject anti-detection init script (runs before every page load)
+	if err := ApplyStealth(context); err != nil {
+		context.Close()
+		return nil, fmt.Errorf("failed to inject stealth script for session %s: %w", sessionID, err)
+	}
+
+	// Auto-load saved cookies for this session (legacy cookie storage;
+	// superseded by StorageStatePath but kept for backward compat)
 	cookieStorage := NewSessionCookieStorage(sessionID)
 	cookies, err := cookieStorage.LoadAll()
 	if err == nil && len(cookies) > 0 {
@@ -1504,6 +1573,85 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		}
 		return Response{Success: true, Data: map[string]interface{}{"message": msg}}
 
+	// Storage state commands (cookies + localStorage for login reuse)
+	case "storage_state_save":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return fail(err)
+		}
+		path := optString(cmd.Params, "path", "")
+		if path == "" {
+			// Default: save alongside session cookies
+			path = filepath.Join("/tmp", "browser-cli", "state", cmd.SessionID+".json")
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			return fail(fmt.Errorf("failed to create state directory: %w", err))
+		}
+		state, err := ss.Context.StorageState(path)
+		if err != nil {
+			return fail(fmt.Errorf("failed to save storage state: %w", err))
+		}
+		return Response{Success: true, Data: map[string]interface{}{
+			"path":       path,
+			"cookies":    len(state.Cookies),
+			"origins":    len(state.Origins),
+			"message":    fmt.Sprintf("Storage state saved to %s (%d cookies, %d origins)", path, len(state.Cookies), len(state.Origins)),
+		}}
+
+	case "storage_state_load":
+		ss, err := s.getSession(cmd.SessionID)
+		if err != nil {
+			return fail(err)
+		}
+		path := optString(cmd.Params, "path", "")
+		if path == "" {
+			return Response{Success: false, Error: "path is required"}
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fail(fmt.Errorf("failed to read storage state: %w", err))
+		}
+		var state playwright.StorageState
+		if err := json.Unmarshal(data, &state); err != nil {
+			return fail(fmt.Errorf("invalid storage state file: %w", err))
+		}
+		// Add cookies from state
+		if len(state.Cookies) > 0 {
+			optionalCookies := make([]playwright.OptionalCookie, len(state.Cookies))
+			for i, c := range state.Cookies {
+				optionalCookies[i] = c.ToOptionalCookie()
+			}
+			if err := ss.Context.AddCookies(optionalCookies); err != nil {
+				return fail(fmt.Errorf("failed to add cookies: %w", err))
+			}
+		}
+		// Add localStorage from state
+		for _, origin := range state.Origins {
+			if len(origin.LocalStorage) == 0 {
+				continue
+			}
+			// Create a page, navigate to the origin, then set localStorage.
+			// localStorage is origin-scoped, so we must be on the right origin.
+			page, err := ss.Context.NewPage()
+			if err != nil {
+				continue // best-effort; cookies are the critical part
+			}
+			if _, err := page.Goto(origin.Origin); err != nil {
+				page.Close()
+				continue
+			}
+			for _, lv := range origin.LocalStorage {
+				script := fmt.Sprintf(`window.localStorage.setItem(%q, %q)`, lv.Name, lv.Value)
+				_, _ = page.Evaluate(script)
+			}
+			page.Close()
+		}
+		return Response{Success: true, Data: map[string]interface{}{
+			"cookies": len(state.Cookies),
+			"origins": len(state.Origins),
+			"message": fmt.Sprintf("Loaded storage state from %s (%d cookies, %d origins)", path, len(state.Cookies), len(state.Origins)),
+		}}
+
 	// Run multi-step
 	case "run":
 		actions, ok := cmd.Params["actions"].([]interface{})
@@ -1681,8 +1829,8 @@ func (s *Server) Stop() {
 			ss.mu.Unlock()
 		}
 
-		// Close browser
-		if s.browser != nil {
+		// Close browser (skip if connected via CDP — we don't own it)
+		if s.browser != nil && s.cdpEndpoint == "" {
 			s.browser.Close()
 		}
 

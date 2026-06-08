@@ -149,3 +149,8 @@ func GetSessionDir(sessionID string) string {
 	}
 	return filepath.Join("/tmp", "browser-cli", "sessions", sessionID)
 }
+
+// DefaultStatePath returns the default file path for saving storage state.
+func DefaultStatePath() string {
+	return filepath.Join("/tmp", "browser-cli", "state", "default.json")
+}

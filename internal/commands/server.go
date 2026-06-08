@@ -21,6 +21,9 @@ var (
 	serverHeadless    bool
 	serverSocket      string
 	serverIdleTimeout time.Duration
+	serverCDPEndpoint string
+	serverChrome      bool
+	serverStatePath   string
 )
 
 // serverCmd represents the server command (foreground, for manual use)
@@ -277,10 +280,16 @@ func init() {
 	serverCmd.Flags().BoolVar(&serverHeadless, "headless", true, "Run in headless mode")
 	serverCmd.Flags().StringVar(&serverSocket, "socket", "", "Unix socket path")
 	serverCmd.Flags().DurationVar(&serverIdleTimeout, "idle-timeout", 1*time.Hour, "Auto-shutdown after idle period (e.g. 30m, 1h, 0 to disable)")
+	serverCmd.Flags().StringVar(&serverCDPEndpoint, "cdp-endpoint", "", "Connect to existing browser via CDP (e.g. http://localhost:9222)")
+	serverCmd.Flags().BoolVar(&serverChrome, "chrome", false, "Use system-installed Google Chrome (via Playwright channel) instead of bundled Chromium")
+	serverCmd.Flags().StringVar(&serverStatePath, "state", "", "Path to storage state JSON file (cookies+localStorage) for login reuse")
 
 	serverStartCmd.Flags().StringVar(&serverBrowser, "browser", "chromium", "Browser to use")
 	serverStartCmd.Flags().BoolVar(&serverHeadless, "headless", true, "Run in headless mode")
 	serverStartCmd.Flags().DurationVar(&serverIdleTimeout, "idle-timeout", 1*time.Hour, "Auto-shutdown after idle period")
+	serverStartCmd.Flags().StringVar(&serverCDPEndpoint, "cdp-endpoint", "", "Connect to existing browser via CDP (e.g. http://localhost:9222)")
+	serverStartCmd.Flags().BoolVar(&serverChrome, "chrome", false, "Use system-installed Google Chrome (via Playwright channel) instead of bundled Chromium")
+	serverStartCmd.Flags().StringVar(&serverStatePath, "state", "", "Path to storage state JSON file (cookies+localStorage) for login reuse")
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -302,6 +311,9 @@ func runServer(cmd *cobra.Command, args []string) error {
 		SocketPath:  serverSocket,
 		Proxy:       proxy,
 		IdleTimeout: serverIdleTimeout,
+		CDPEndpoint: serverCDPEndpoint,
+		Chrome:      serverChrome,
+		StatePath:   serverStatePath,
 	}
 
 	server, err := browser.NewServer(cfg)
@@ -338,6 +350,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		SocketPath:  serverSocket,
 		Proxy:       proxy,
 		IdleTimeout: serverIdleTimeout,
+		CDPEndpoint: serverCDPEndpoint,
+		Chrome:      serverChrome,
+		StatePath:   serverStatePath,
 	}
 
 	server, err := browser.NewServer(cfg)
@@ -419,17 +434,23 @@ func ensureServer() (*browser.Client, error) {
 
 	// Server not running, start it in background
 	serverCmd := exec.Command(os.Args[0], "server-start")
-	// Add headless flag based on current setting
+	// Add headless flag only when explicitly enabled
 	if headless {
 		serverCmd.Args = append(serverCmd.Args, "--headless")
-	} else {
-		serverCmd.Args = append(serverCmd.Args, "--headless=false")
 	}
 	// Pass idle timeout
 	if idleTimeout > 0 {
 		serverCmd.Args = append(serverCmd.Args, "--idle-timeout", idleTimeout.String())
 	} else {
 		serverCmd.Args = append(serverCmd.Args, "--idle-timeout", "0")
+	}
+	// Pass state path for login reuse
+	if statePath != "" {
+		serverCmd.Args = append(serverCmd.Args, "--state", statePath)
+	}
+	// Pass proxy
+	if proxy != "" {
+		serverCmd.Args = append(serverCmd.Args, "--proxy", proxy)
 	}
 
 	// Start server in background

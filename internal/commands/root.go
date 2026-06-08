@@ -17,6 +17,7 @@ var (
 	sessionID   string
 	proxy       string
 	idleTimeout time.Duration
+	statePath   string
 
 	// Version
 	version string
@@ -81,4 +82,6 @@ func init() {
 		"Proxy server URL (e.g. http://proxy.example.com:8080 or socks5://proxy:1080)")
 	rootCmd.PersistentFlags().DurationVar(&idleTimeout, "idle-timeout", 1*time.Hour,
 		"Auto-shutdown server after idle period (e.g. 30m, 1h, 0 to disable)")
+	rootCmd.PersistentFlags().StringVar(&statePath, "state", "",
+		"Path to storage state JSON file (cookies+localStorage) for login reuse")
 }
