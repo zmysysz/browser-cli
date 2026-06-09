@@ -6,6 +6,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-09
+
+### Added
+
+- **Stealth mode** — `internal/browser/stealth.go` overrides
+  `navigator.webdriver`, `navigator.plugins`, `navigator.mimeTypes`,
+  `window.chrome`, `navigator.permissions.query`, `navigator.languages`,
+  and `navigator.hardwareConcurrency` to reduce automation detection.
+  Chromium launch args include `--disable-blink-features=AutomationControlled`
+  and `IgnoreDefaultArgs: --enable-automation`.
+- `--chrome` flag — use the system-installed Google Chrome instead of
+  Playwright's bundled Chromium. Matches the real Chrome user-agent
+  automatically (no hardcoded UA override).
+- `--cdp-endpoint <url>` flag — connect to an externally-launched browser
+  via Chrome DevTools Protocol. Enables using a standalone Chrome instance
+  that bypasses Playwright's injection, which is required for sites with
+  strict automation detection (e.g. Google sign-in).
+- `browser-cli login <url>` command — open a browser for manual login,
+  wait for the user to finish (Ctrl+C), then save the storage state
+  (cookies + localStorage) to a JSON file for later reuse.
+- `browser-cli state save <path>` / `browser-cli state load <path>`
+  commands — explicitly save or load browser storage state.
+- `--state <path>` flag (root-level, persistent) — automatically load
+  a saved storage state when starting any command. Combined with
+  `login`, this enables a "login once, automate forever" workflow.
+- `storage_state_save` and `storage_state_load` server actions —
+  persist and restore cookies + localStorage via Playwright's native
+  `StorageState()` API. `storage_state_load` navigates to the target
+  origin before setting localStorage (localStorage is origin-scoped).
+
+### Changed
+
+- `ensureServer()` now passes `--state` and `--proxy` to the
+  auto-started server, so `browser-cli --state ./login.json navigate <url>`
+  works without manually starting a server first.
+- Removed hardcoded `UserAgent` from stealth context options — a
+  mismatched UA (e.g. Chrome/131 header on Chrome/149 browser) was
+  a fingerprinting signal.
+
+### Fixed
+
+- `storage_state_load` now creates a new page, navigates to the
+  target origin, sets localStorage items, then closes the page.
+  Previously it tried to set localStorage on whatever page was
+  active, which failed if the page was on a different origin.
+- Added `--disable-dev-shm-usage` and `--no-sandbox` to Chromium
+  launch args for compatibility with container/sandbox environments
+  where `/dev/shm` is read-only or the process runs as root.
+- `Server.Stop()` now skips closing the browser when connected via
+  CDP (`cdpEndpoint != ""`) — the externally-launched browser is
+  not owned by browser-cli and should not be terminated.
+
 ## [0.2.0] - 2026-06-03
 
 ### Added
@@ -94,6 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - AI agent integration files for Claude Code, OpenAI Codex, GAL,
   and `AGENTS.md` for generic agents.
 
-[Unreleased]: https://github.com/zmysysz/browser-cli/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/zmysysz/browser-cli/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/zmysysz/browser-cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/zmysysz/browser-cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/zmysysz/browser-cli/releases/tag/v0.1.0
