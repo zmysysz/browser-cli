@@ -41,3 +41,7 @@ Thumbs.db
 
 # Browser-cli specific
 # Note: /tmp/browser-cli/ is used for runtime data, not in project dir
+
+# Login state files (contain sensitive cookies)
+*-state.json
+*-login.json
