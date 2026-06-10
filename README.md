@@ -6,6 +6,8 @@ A command-line tool for browser automation, designed for AI agents. Built with G
 
 **One command to control the browser — perfect for Codex, Claude Code, Cursor, and any AI coding assistant.**
 
+![Browser-CLI Demo](docs/demo.gif)
+
 ```bash
 browser-cli navigate https://example.com
 browser-cli fill "#search" "browser automation"
