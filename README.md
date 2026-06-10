@@ -1,6 +1,12 @@
 # Browser-CLI
 
+[![GitHub stars](https://img.shields.io/github/stars/zmysysz/browser-cli?style=social)](https://github.com/zmysysz/browser-cli/stargazers)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/zmysysz/browser-cli)](https://goreportcard.com/report/github.com/zmysysz/browser-cli)
+
 [English](README.md) | [中文](README_zh.md)
+
+> **Give your AI agent browser superpowers.** 🚀
 
 A command-line tool for browser automation, designed for AI agents. Built with Go + Playwright.
 
