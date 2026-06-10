@@ -1,4 +1,4 @@
-module github.com/browser-cli
+module github.com/zmysysz/browser-cli
 
 go 1.22
 
