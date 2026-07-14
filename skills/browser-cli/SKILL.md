@@ -1,6 +1,13 @@
+---
+name: browser-cli
+description: Browser automation via CLI. Load when user mentions or agent finds task highly matches browse website, web page interaction, screenshot, fill form, extract web content, web scraping, login automation, or browser task automation.
+---
+
 # Browser-CLI Skill
 
-Browser automation via command-line interface. Use this skill when the user asks to browse websites, interact with web pages, take screenshots, fill forms, extract web content, or automate any browser task.
+Browser automation via command-line interface. Use this skill when the user asks
+to browse websites, interact with web pages, take screenshots, fill forms,
+extract web content, or automate any browser task.
 
 ## Prerequisites
 
@@ -26,15 +33,18 @@ browser-cli status
 - **Session isolation**: Use `--session <id>` to run independent browser instances for parallel tasks.
 - **JSON output**: Use `--output json` for structured results (default for AI agents).
 - **Proxy support**: Use `--proxy http://host:port` if behind a proxy.
+- **Data directory**: Use `--data-dir <path>` or `BROWSER_CLI_HOME` env to customize where socket, cookies, and state live (default: `~/.local/share/browser-cli`).
 
 ## Command Reference
 
 ### Navigation
 ```bash
-browser-cli navigate <url>           # Go to URL
-browser-cli back                     # Go back
-browser-cli forward                  # Go forward
-browser-cli reload                   # Reload page
+browser-cli navigate <url>                    # Go to URL
+browser-cli navigate <url> --wait-for <sel>   # Navigate, then wait for element
+browser-cli navigate <url> --wait-timeout 60s # With wait-for timeout
+browser-cli back                              # Go back
+browser-cli forward                           # Go forward
+browser-cli reload                            # Reload page
 ```
 
 ### Interaction
@@ -52,13 +62,19 @@ browser-cli keyboard <key>           # Press key/combo (Ctrl+A, Enter, etc.)
 browser-cli upload <selector> <file> # Upload file
 ```
 
+Interaction commands (click, fill, select, type, etc.) return the current page
+URL and title in the response, so you can detect navigation without a separate
+`text` or `screenshot` call.
+
 ### Extraction
 ```bash
-browser-cli text                     # Extract page text
-browser-cli screenshot [path]        # Take screenshot
-browser-cli elements <selector>      # Find elements
-browser-cli pdf [file]               # Save as PDF (Chromium only)
-browser-cli eval <javascript>        # Execute JavaScript
+browser-cli text                           # Extract page text
+browser-cli text --max-length 5000         # Truncate to prevent token blowup
+browser-cli screenshot [path]              # Take screenshot to file
+browser-cli screenshot --base64            # Return screenshot as base64 (for remote agents)
+browser-cli elements <selector>            # Find elements (batch-extracted in one round-trip)
+browser-cli pdf [file]                     # Save as PDF (Chromium only)
+browser-cli eval <javascript>              # Execute JavaScript
 ```
 
 ### Utility
@@ -94,7 +110,11 @@ browser-cli stop                     # Stop server (cookies auto-saved)
 
 ### Multi-step
 ```bash
+# Run a pipeline of actions
 browser-cli run "navigate <url>; click <sel>; text"
+
+# Abort on first error
+browser-cli run "navigate <url>; click <sel>" --stop-on-error
 ```
 
 ## Selector Syntax
@@ -131,6 +151,12 @@ browser-cli screenshot report.png
 browser-cli pdf --landscape report.pdf
 ```
 
+### Screenshot as base64 (for remote AI agents)
+```bash
+browser-cli navigate https://example.com
+browser-cli screenshot --base64
+```
+
 ### Handle a dialog
 ```bash
 browser-cli click "button.delete"
@@ -163,9 +189,14 @@ All commands return JSON with `status` field:
 
 Always check `status` === "success" before proceeding.
 
+Interaction commands also return `url` and `title` in `data`:
+```json
+{"command": "click", "status": "success", "data": {"url": "...", "title": "..."}}
+```
+
 ## Important Notes
 
-- Server auto-starts on first command — no need to manually start it
+- Server auto-starts on first command - no need to manually start it
 - Always call `browser-cli stop` when done to clean up resources
 - Use `--headless=false` for debugging (shows browser window)
 - Use `--session <id>` to isolate parallel tasks
@@ -173,3 +204,6 @@ Always check `status` === "success" before proceeding.
 - `pdf` command only works with Chromium browser
 - `smart-click` is for Web Components that don't respond to normal clicks
 - `pick` command helps discover element selectors from coordinates
+- Use `--data-dir` or `BROWSER_CLI_HOME` to customize the data directory
+- Use `screenshot --base64` when running as a remote agent without filesystem access
+- Use `text --max-length` to avoid token blowup on large pages
