@@ -11,6 +11,7 @@ dist/
 *.dll
 *.so
 *.dylib
+/browser-cli
 
 # Test binary
 *.test
