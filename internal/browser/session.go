@@ -19,7 +19,7 @@ func NewSessionCookieStorage(sessionID string) *SessionCookieStorage {
 	if sessionID == "" {
 		sessionID = "default"
 	}
-	basePath := filepath.Join("/tmp", "browser-cli", "cookies", sessionID)
+	basePath := CookieDir(sessionID)
 	os.MkdirAll(basePath, 0755)
 	return &SessionCookieStorage{basePath: basePath}
 }
@@ -143,14 +143,5 @@ type CookieInfo struct {
 }
 
 // GetSessionDir returns the session directory (for compatibility)
-func GetSessionDir(sessionID string) string {
-	if sessionID == "" {
-		sessionID = "default"
-	}
-	return filepath.Join("/tmp", "browser-cli", "sessions", sessionID)
-}
+// Defined in datadir.go.
 
-// DefaultStatePath returns the default file path for saving storage state.
-func DefaultStatePath() string {
-	return filepath.Join("/tmp", "browser-cli", "state", "default.json")
-}

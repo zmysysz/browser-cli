@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/playwright-community/playwright-go"
 )
+
 
 // DialogInfo represents a pending dialog
 type DialogInfo struct {
@@ -144,7 +146,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 			pw.Stop()
 			return nil, fmt.Errorf("failed to connect to CDP endpoint %s: %w", cfg.CDPEndpoint, err)
 		}
-		fmt.Printf("Connected to browser via CDP: %s\n", cfg.CDPEndpoint)
+		Logger.Info("connected to browser via CDP", "endpoint", cfg.CDPEndpoint)
 	} else {
 		switch cfg.Browser {
 		case "firefox":
@@ -196,12 +198,12 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("failed to launch browser: %w", err)
 	}
 
-	// Determine socket path — single socket for all sessions
+	// Determine socket path - single socket for all sessions
 	socketPath := cfg.SocketPath
 	if socketPath == "" {
-		socketPath = GetSocketPath("")
+		socketPath = SocketPath()
 	}
-	os.MkdirAll(filepath.Dir(socketPath), 0755)
+	os.MkdirAll(filepath.Dir(socketPath), 0700)
 
 	// Remove existing socket file
 	os.Remove(socketPath)
@@ -213,6 +215,14 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		pw.Stop()
 		return nil, fmt.Errorf("failed to create listener: %w", err)
 	}
+
+	// Restrict socket access to the current user only. Without this,
+	// any process on the same machine can send commands to the browser
+	// server (read cookies, navigate, execute JS, etc.).
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		Logger.Warn("failed to restrict socket permissions", "path", socketPath, "error", err)
+	}
+
 
 	idleTimeout := cfg.IdleTimeout
 	idleDisabled := false
@@ -272,7 +282,7 @@ func (s *Server) idleMonitor() {
 		}
 		idle := time.Duration(time.Now().UnixNano() - s.lastActivityUnixNano.Load())
 		if idle >= s.idleTimeout {
-			fmt.Printf("Server idle for %v (threshold: %v), shutting down...\n", idle.Round(time.Second), s.idleTimeout)
+			Logger.Info("server idle, shutting down", "idle", idle.Round(time.Second), "threshold", s.idleTimeout)
 			s.Stop()
 			return
 		}
@@ -281,14 +291,13 @@ func (s *Server) idleMonitor() {
 
 // Start starts the server and listens for commands
 func (s *Server) Start() error {
-	fmt.Printf("Browser server started at %s\n", s.socketPath)
-	fmt.Println("Press Ctrl+C to stop")
+	Logger.Info("browser server started", "socket", s.socketPath)
 
 	for s.running.Load() {
 		conn, err := s.listener.Accept()
 		if err != nil {
 			if s.running.Load() {
-				fmt.Printf("Accept error: %v\n", err)
+				Logger.Warn("accept error", "error", err)
 			}
 			continue
 		}
@@ -497,11 +506,12 @@ func (s *Server) buildSession(sessionID string) (*SessionState, error) {
 	if s.statePath != "" {
 		if _, err := os.Stat(s.statePath); err == nil {
 			contextOpts.StorageStatePath = playwright.String(s.statePath)
-			fmt.Printf("Loading storage state from %s\n", s.statePath)
+			Logger.Info("loading storage state", "path", maskPath(s.statePath))
 		} else {
-			fmt.Printf("Warning: storage state file %s not found, starting fresh\n", s.statePath)
+			Logger.Warn("storage state file not found, starting fresh", "path", maskPath(s.statePath))
 		}
 	}
+
 
 	context, err := s.browser.NewContext(contextOpts)
 	if err != nil {
@@ -524,11 +534,12 @@ func (s *Server) buildSession(sessionID string) (*SessionState, error) {
 			optionalCookies[i] = c.ToOptionalCookie()
 		}
 		if err := context.AddCookies(optionalCookies); err != nil {
-			fmt.Printf("Warning: failed to load cookies for session %s: %v\n", sessionID, err)
+			Logger.Warn("failed to load cookies", "session", sessionID, "error", err)
 		} else {
-			fmt.Printf("Loaded %d cookies for session %s\n", len(cookies), sessionID)
+			Logger.Info("loaded cookies", "count", len(cookies), "session", sessionID)
 		}
 	}
+
 
 	// Create initial page
 	page, err := context.NewPage()
@@ -582,12 +593,41 @@ func (s *Server) setupDialogHandler(ss *SessionState, page playwright.Page) {
 //
 // Replaces the original "hold s.mu for the whole command" approach.
 // The only thing this function synchronises globally is the
-// lastActivity timestamp (via atomic) — everything else is per-session.
+// lastActivity timestamp (via atomic) - everything else is per-session.
 // Long-running commands (navigate, click, run+sleep) no longer block
 // other sessions' commands.
-func (s *Server) executeCommand(cmd Command) Response {
+//
+// A deferred recover() catches panics from playwright-go or type
+// assertion failures, converting them into error responses instead of
+// crashing the entire server process and losing all sessions.
+func (s *Server) executeCommand(cmd Command) (resp Response) {
 	s.lastActivityUnixNano.Store(time.Now().UnixNano())
+
+	defer func() {
+		if r := recover(); r != nil {
+			Logger.Error("panic in command execution",
+				"action", cmd.Action,
+				"session", cmd.SessionID,
+				"panic", fmt.Sprintf("%v", r),
+			)
+			resp = fail(fmt.Errorf("internal error (action %s): %v", cmd.Action, r))
+		}
+	}()
+
 	return s.executeCommandInternal(cmd)
+}
+
+// pageContext returns a map with the current page URL and title.
+// Used by interaction commands to give the AI agent context after
+// an action (e.g., "click" returns the new URL so the agent can
+// detect navigation without a separate text/screenshot call).
+func pageContext(page playwright.Page) map[string]interface{} {
+	url := page.URL()
+	title, _ := page.Title()
+	return map[string]interface{}{
+		"url":   url,
+		"title": title,
+	}
 }
 
 // executeCommandInternal executes without holding any server-wide lock.
@@ -803,18 +843,31 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if !ok {
 			return Response{Success: false, Error: "no active tab in session"}
 		}
-		_, err = page.Goto(url)
+		resp, err := page.Goto(url)
 		if err != nil {
 			return fail(err)
 		}
-		title, _ := page.Title()
-		return Response{
-			Success: true,
-			Data: map[string]interface{}{
-				"url":   page.URL(),
-				"title": title,
-			},
+		// Wait for an element if --wait-for selector was passed
+		waitFor := optString(cmd.Params, "wait_for", "")
+		if waitFor != "" {
+			waitTimeout := optFloat(cmd.Params, "wait_timeout", 30000.0)
+			_, waitErr := page.WaitForSelector(waitFor, playwright.PageWaitForSelectorOptions{
+				Timeout: playwright.Float(waitTimeout),
+			})
+			if waitErr != nil {
+				return fail(fmt.Errorf("wait-for failed: %w", waitErr))
+			}
 		}
+		title, _ := page.Title()
+		data := map[string]interface{}{
+			"url":   page.URL(),
+			"title": title,
+		}
+		if resp != nil {
+			data["status"] = int(resp.Status())
+		}
+		return Response{Success: true, Data: data}
+
 
 	case "back":
 		ss, err := s.getSession(cmd.SessionID)
@@ -881,7 +934,7 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true}
+		return Response{Success: true, Data: pageContext(page)}
 
 	case "click-js":
 		ss, err := s.getSession(cmd.SessionID)
@@ -910,7 +963,9 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true, Data: map[string]interface{}{"result": result}}
+		data := pageContext(page)
+		data["result"] = result
+		return Response{Success: true, Data: data}
 
 	case "smart-click":
 		ss, err := s.getSession(cmd.SessionID)
@@ -930,7 +985,8 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true}
+		return Response{Success: true, Data: pageContext(page)}
+
 
 	case "pick":
 		ss, err := s.getSession(cmd.SessionID)
@@ -1135,7 +1191,7 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true}
+		return Response{Success: true, Data: pageContext(page)}
 
 	case "fill":
 		ss, err := s.getSession(cmd.SessionID)
@@ -1158,7 +1214,7 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true}
+		return Response{Success: true, Data: pageContext(page)}
 
 	case "type":
 		ss, err := s.getSession(cmd.SessionID)
@@ -1181,7 +1237,7 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true}
+		return Response{Success: true, Data: pageContext(page)}
 
 	case "select":
 		ss, err := s.getSession(cmd.SessionID)
@@ -1206,7 +1262,8 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true}
+		return Response{Success: true, Data: pageContext(page)}
+
 
 	// Extraction commands
 	case "eval":
@@ -1233,13 +1290,30 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		path := optString(cmd.Params, "path", "screenshot.png")
-		if path == "" {
-			path = "screenshot.png"
-		}
 		page, ok := ss.activePage()
 		if !ok {
 			return Response{Success: false, Error: "no active tab in session"}
+		}
+
+		// --base64 mode: return image data inline (for remote AI agents)
+		if optBool(cmd.Params, "base64", false) {
+			imgBytes, err := page.Screenshot(playwright.PageScreenshotOptions{
+				Timeout: playwright.Float(5000),
+			})
+			if err != nil {
+				return fail(err)
+			}
+			return Response{Success: true, Data: map[string]interface{}{
+				"base64":   base64.StdEncoding.EncodeToString(imgBytes),
+				"mime_type": "image/png",
+				"size":      len(imgBytes),
+			}}
+		}
+
+		// File mode: write to disk
+		path := optString(cmd.Params, "path", "screenshot.png")
+		if path == "" {
+			path = "screenshot.png"
 		}
 		_, err = page.Screenshot(playwright.PageScreenshotOptions{
 			Path:    playwright.String(path),
@@ -1249,6 +1323,7 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 			return fail(err)
 		}
 		return Response{Success: true, Data: map[string]interface{}{"path": path}}
+
 
 	case "text":
 		ss, err := s.getSession(cmd.SessionID)
@@ -1263,7 +1338,19 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if err != nil {
 			return fail(err)
 		}
-		return Response{Success: true, Data: map[string]interface{}{"text": text}}
+		// Truncate if max_length is set (prevents token blowup on large pages)
+		maxLen := int(optFloat(cmd.Params, "max_length", 0))
+		truncated := false
+		if maxLen > 0 && len(text) > maxLen {
+			text = text[:maxLen]
+			truncated = true
+		}
+		data := map[string]interface{}{"text": text}
+		if truncated {
+			data["truncated"] = true
+		}
+		return Response{Success: true, Data: data}
+
 
 	case "elements":
 		ss, err := s.getSession(cmd.SessionID)
@@ -1278,31 +1365,33 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if !ok {
 			return Response{Success: false, Error: "no active tab in session"}
 		}
-		elements, err := page.QuerySelectorAll(selector)
+		// Batch-extract all element attributes in a single JS round-trip
+		// instead of 6 per-element CDP calls. For 100 elements this is
+		// 1 round-trip vs 600.
+		batchScript := fmt.Sprintf(`(selector) => {
+			const els = document.querySelectorAll(selector);
+			return Array.from(els).map(el => ({
+				tag: el.tagName,
+				text: (el.textContent || '').trim(),
+				id: el.id || '',
+				class: el.className || '',
+				href: el.href || '',
+				visible: el.offsetParent !== null || el.getClientRects().length > 0
+			}));
+		}`)
+		result, err := page.Evaluate(batchScript, selector)
 		if err != nil {
 			return fail(err)
 		}
-		var items []map[string]interface{}
-		for _, el := range elements {
-			tag, _ := el.Evaluate("el => el.tagName")
-			text, _ := el.Evaluate("el => el.textContent")
-			id, _ := el.Evaluate("el => el.id")
-			class, _ := el.Evaluate("el => el.className")
-			href, _ := el.Evaluate("el => el.href")
-			visible, _ := el.IsVisible()
-			items = append(items, map[string]interface{}{
-				"tag":     tag,
-				"text":    text,
-				"id":      id,
-				"class":   class,
-				"href":    href,
-				"visible": visible,
-			})
+		items, _ := result.([]interface{})
+		if items == nil {
+			items = []interface{}{}
 		}
 		return Response{Success: true, Data: map[string]interface{}{
 			"count": len(items),
 			"items": items,
 		}}
+
 
 	// Wait/scroll
 	case "wait":
@@ -1582,7 +1671,7 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		path := optString(cmd.Params, "path", "")
 		if path == "" {
 			// Default: save alongside session cookies
-			path = filepath.Join("/tmp", "browser-cli", "state", cmd.SessionID+".json")
+			path = StateFilePath(cmd.SessionID)
 		}
 		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 			return fail(fmt.Errorf("failed to create state directory: %w", err))
@@ -1658,7 +1747,9 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 		if !ok {
 			return Response{Success: false, Error: "run requires actions array"}
 		}
+		stopOnError := optBool(cmd.Params, "stop_on_error", false)
 		results := make([]map[string]interface{}, 0)
+		var aborted bool
 		for i, actionInterface := range actions {
 			actionMap, ok := actionInterface.(map[string]interface{})
 			if !ok {
@@ -1667,6 +1758,10 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					"status": "error",
 					"error":  "invalid action format",
 				})
+				if stopOnError {
+					aborted = true
+					break
+				}
 				continue
 			}
 			actionName, err := paramString(actionMap, "action")
@@ -1676,6 +1771,10 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 					"status": "error",
 					"error":  "invalid action format: " + err.Error(),
 				})
+				if stopOnError {
+					aborted = true
+					break
+				}
 				continue
 			}
 			params, _ := actionMap["params"].(map[string]interface{})
@@ -1699,6 +1798,12 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 								"status": "error",
 								"error":  fmt.Sprintf("sleep: duration_ms must be number, got %T", v),
 							})
+							if stopOnError {
+								aborted = true
+							}
+							if aborted {
+								break
+							}
 							continue
 						}
 					}
@@ -1734,11 +1839,22 @@ func (s *Server) executeCommandInternal(cmd Command) Response {
 				result["error"] = resp.Error
 			}
 			results = append(results, result)
+
+			// Abort on first error if stop_on_error is set
+			if !resp.Success && stopOnError {
+				aborted = true
+				break
+			}
 		}
-		return Response{Success: true, Data: map[string]interface{}{
+		runData := map[string]interface{}{
 			"total_steps": len(results),
 			"results":     results,
-		}}
+		}
+		if aborted {
+			runData["aborted"] = true
+			runData["message"] = "pipeline aborted due to step error (stop_on_error=true)"
+		}
+		return Response{Success: true, Data: runData}
 
 	case "stop":
 		// Mark the server as stopping, close the listener to unblock
@@ -1844,15 +1960,21 @@ func (s *Server) Stop() {
 	})
 }
 
-// GetSocketPath returns the socket path for the server
-// In single-server mode, there's only one socket regardless of session
-func GetSocketPath(sessionID string) string {
-	return filepath.Join("/tmp", "browser-cli", "server.sock")
-}
+// DefaultClientTimeout is the maximum time a client waits for a response.
+
+// This prevents AI agents from hanging indefinitely when the server is
+// stuck (e.g. playwright deadlock, unresponsive page). Commands that need
+// longer (navigate with a slow site) pass a custom timeout via the
+// Client.Timeout field.
+const DefaultClientTimeout = 5 * time.Minute
 
 // Client connects to the browser server
 type Client struct {
 	socketPath string
+	// Timeout is the deadline for dial + read. Zero means use
+	// DefaultClientTimeout. Set to a larger value for long-running
+	// commands (navigate, screenshot of a huge page).
+	Timeout time.Duration
 }
 
 // NewClient creates a new client
@@ -1869,12 +1991,27 @@ func NewClient(socketPath string) *Client {
 // by the JSON payload. The framing is the same on the way back. This lets
 // requests and responses be arbitrarily large (up to 16 MiB) without
 // truncation.
+//
+// A deadline is set on the connection so the client never blocks forever.
+// If the server does not respond within the timeout, the error message
+// includes the elapsed time so the AI agent can decide to retry.
 func (c *Client) SendCommand(cmd Command) (Response, error) {
-	conn, err := net.Dial("unix", c.socketPath)
+	timeout := c.Timeout
+	if timeout == 0 {
+		timeout = DefaultClientTimeout
+	}
+
+	conn, err := net.DialTimeout("unix", c.socketPath, timeout)
 	if err != nil {
 		return Response{}, fmt.Errorf("Failed to connect to server: %w (is server running?)", err)
 	}
 	defer conn.Close()
+
+	// Set an overall deadline for the write + read cycle.
+	deadline := time.Now().Add(timeout)
+	if err := conn.SetDeadline(deadline); err != nil {
+		return Response{}, fmt.Errorf("failed to set deadline: %w", err)
+	}
 
 	data, err := json.Marshal(cmd)
 	if err != nil {
@@ -1887,7 +2024,7 @@ func (c *Client) SendCommand(cmd Command) (Response, error) {
 
 	body, err := readFrame(conn)
 	if err != nil {
-		return Response{}, fmt.Errorf("Failed to read response: %w", err)
+		return Response{}, fmt.Errorf("Failed to read response (timeout=%s): %w", timeout, err)
 	}
 
 	var resp Response
@@ -1900,6 +2037,9 @@ func (c *Client) SendCommand(cmd Command) (Response, error) {
 
 // Ping checks if server is running
 func (c *Client) Ping() bool {
+	origTimeout := c.Timeout
+	c.Timeout = 5 * time.Second // quick check
+	defer func() { c.Timeout = origTimeout }()
 	resp, err := c.SendCommand(Command{Action: "ping"})
 	return err == nil && resp.Success
 }

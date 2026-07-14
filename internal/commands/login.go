@@ -207,7 +207,7 @@ func init() {
 	rootCmd.AddCommand(loginCmd)
 	rootCmd.AddCommand(stateCmd)
 
-	loginCmd.Flags().StringVar(&loginStatePath, "state", "", "Path to save storage state (default: /tmp/browser-cli/state/default.json)")
+	loginCmd.Flags().StringVar(&loginStatePath, "state", "", "Path to save storage state (default: <data-dir>/state/default.json)")
 	loginCmd.Flags().BoolVar(&loginChrome, "chrome", false, "Use system-installed Google Chrome")
 	loginCmd.Flags().StringVar(&loginProxy, "proxy", "", "Proxy server URL")
 

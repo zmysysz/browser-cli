@@ -1,8 +1,8 @@
 package commands
 
 import (
-	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,6 +16,9 @@ import (
 	"github.com/browser-cli/internal/browser"
 )
 
+
+
+
 var (
 	serverBrowser     string
 	serverHeadless    bool
@@ -24,7 +27,11 @@ var (
 	serverCDPEndpoint string
 	serverChrome      bool
 	serverStatePath   string
+	serverDataDir     string
+	serverLogLevel    string
+	serverLogFormat   string
 )
+
 
 // serverCmd represents the server command (foreground, for manual use)
 var serverCmd = &cobra.Command{
@@ -283,6 +290,9 @@ func init() {
 	serverCmd.Flags().StringVar(&serverCDPEndpoint, "cdp-endpoint", "", "Connect to existing browser via CDP (e.g. http://localhost:9222)")
 	serverCmd.Flags().BoolVar(&serverChrome, "chrome", false, "Use system-installed Google Chrome (via Playwright channel) instead of bundled Chromium")
 	serverCmd.Flags().StringVar(&serverStatePath, "state", "", "Path to storage state JSON file (cookies+localStorage) for login reuse")
+	serverCmd.Flags().StringVar(&serverDataDir, "data-dir", "", "Data directory for socket, cookies, and state (default: ~/.local/share/browser-cli or $BROWSER_CLI_HOME)")
+	serverCmd.Flags().StringVar(&serverLogLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	serverCmd.Flags().StringVar(&serverLogFormat, "log-format", "text", "Log format: text or json")
 
 	serverStartCmd.Flags().StringVar(&serverBrowser, "browser", "chromium", "Browser to use")
 	serverStartCmd.Flags().BoolVar(&serverHeadless, "headless", true, "Run in headless mode")
@@ -290,6 +300,41 @@ func init() {
 	serverStartCmd.Flags().StringVar(&serverCDPEndpoint, "cdp-endpoint", "", "Connect to existing browser via CDP (e.g. http://localhost:9222)")
 	serverStartCmd.Flags().BoolVar(&serverChrome, "chrome", false, "Use system-installed Google Chrome (via Playwright channel) instead of bundled Chromium")
 	serverStartCmd.Flags().StringVar(&serverStatePath, "state", "", "Path to storage state JSON file (cookies+localStorage) for login reuse")
+	serverStartCmd.Flags().StringVar(&serverDataDir, "data-dir", "", "Data directory for socket, cookies, and state (default: ~/.local/share/browser-cli or $BROWSER_CLI_HOME)")
+	serverStartCmd.Flags().StringVar(&serverLogLevel, "log-level", "info", "Log level: debug, info, warn, error")
+	serverStartCmd.Flags().StringVar(&serverLogFormat, "log-format", "text", "Log format: text or json")
+}
+
+
+// initServerEnv initializes the data directory and structured logger.
+// Shared by runServer and runServerStart so both foreground and
+// background servers get the same setup.
+func initServerEnv() error {
+	// Prefer the server-specific flag, fall back to the global --data-dir
+	dir := serverDataDir
+	if dir == "" {
+		dir = dataDir
+	}
+	if err := browser.InitDataDir(dir); err != nil {
+		return err
+	}
+
+	level := slog.LevelInfo
+	switch strings.ToLower(serverLogLevel) {
+	case "debug":
+		level = slog.LevelDebug
+	case "warn":
+		level = slog.LevelWarn
+	case "error":
+		level = slog.LevelError
+	}
+
+	format := browser.LogFormatText
+	if strings.ToLower(serverLogFormat) == "json" {
+		format = browser.LogFormatJSON
+	}
+	browser.InitLogger(format, level)
+	return nil
 }
 
 func runServer(cmd *cobra.Command, args []string) error {
@@ -302,8 +347,13 @@ func runServer(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Initialize data dir + logger
+	if err := initServerEnv(); err != nil {
+		return fmt.Errorf("failed to initialize server environment: %w", err)
+	}
+
 	// Start new server
-	fmt.Println("Starting browser server...")
+	browser.Logger.Info("starting browser server")
 
 	cfg := browser.ServerConfig{
 		Browser:     serverBrowser,
@@ -326,7 +376,7 @@ func runServer(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		fmt.Println("\nShutting down server...")
+		browser.Logger.Info("shutting down server (signal received)")
 		server.Stop()
 		os.Exit(0)
 	}()
@@ -343,6 +393,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// Initialize data dir + logger
+	if err := initServerEnv(); err != nil {
+		return fmt.Errorf("failed to initialize server environment: %w", err)
+	}
+
 	// Start new server
 	cfg := browser.ServerConfig{
 		Browser:     serverBrowser,
@@ -372,6 +427,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	return server.Start()
 }
 
+
 func runStatus(cmd *cobra.Command, args []string) error {
 	client := browser.NewClient("")
 	resp, err := client.SendCommand(browser.Command{Action: "status"})
@@ -379,15 +435,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("server not running: %w", err)
 	}
 
-	output := map[string]interface{}{
-		"command": "status",
-		"status":  "success",
-		"data":    resp.Data,
-	}
-
-	data, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(data))
-	return nil
+	return printResult("status", resp.Success, resp.Data, resp.Error, outputFmt)
 }
 
 func runStop(cmd *cobra.Command, args []string) error {
@@ -410,16 +458,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("server not running: %w", err)
 	}
 
-	output := map[string]interface{}{
-		"command":  "session-list",
-		"status":   "success",
-		"sessions": resp.Data["sessions"],
-		"count":    resp.Data["count"],
-	}
-
-	data, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(data))
-	return nil
+	return printResult("session-list", resp.Success, resp.Data, resp.Error, outputFmt)
 }
 
 // ensureServer ensures a browser server is running, starts one if not
@@ -432,8 +471,16 @@ func ensureServer() (*browser.Client, error) {
 		return client, nil
 	}
 
+	// Resolve the absolute path to the current executable so that
+	// symlinks, PATH lookups, and `go run` don't break auto-start.
+	binaryPath, err := os.Executable()
+	if err != nil {
+		// Fallback to os.Args[0] if os.Executable fails (rare)
+		binaryPath = os.Args[0]
+	}
+
 	// Server not running, start it in background
-	serverCmd := exec.Command(os.Args[0], "server-start")
+	serverCmd := exec.Command(binaryPath, "server-start")
 	// Add headless flag only when explicitly enabled
 	if headless {
 		serverCmd.Args = append(serverCmd.Args, "--headless")
@@ -451,6 +498,14 @@ func ensureServer() (*browser.Client, error) {
 	// Pass proxy
 	if proxy != "" {
 		serverCmd.Args = append(serverCmd.Args, "--proxy", proxy)
+	}
+	// Pass data-dir so the server uses the same data directory as the client
+	if dataDir != "" {
+		serverCmd.Args = append(serverCmd.Args, "--data-dir", dataDir)
+	}
+	// Pass browser type
+	if browserType != "" && browserType != "chromium" {
+		serverCmd.Args = append(serverCmd.Args, "--browser", browserType)
 	}
 
 	// Start server in background
@@ -470,7 +525,12 @@ func ensureServer() (*browser.Client, error) {
 	return nil, fmt.Errorf("server failed to start within 30 seconds")
 }
 
-// sendCommand sends a command to the server and outputs the result
+
+// sendCommand sends a command to the server and outputs the result.
+//
+// Returns an error when the server reports command failure, so cobra
+// produces a non-zero exit code. This lets AI agents detect success/failure
+// via exit code without parsing JSON.
 func sendCommand(action string, params map[string]interface{}) error {
 	client, err := ensureServer()
 	if err != nil {
@@ -495,20 +555,5 @@ func sendCommand(action string, params map[string]interface{}) error {
 		return fmt.Errorf("command failed: %w", err)
 	}
 
-	output := map[string]interface{}{
-		"command": action,
-		"status":  "success",
-	}
-	if resp.Data != nil {
-		output["data"] = resp.Data
-	}
-	if resp.Error != "" {
-		output["status"] = "error"
-		output["error"] = resp.Error
-	}
-	output["session"] = sessionID
-
-	data, _ := json.MarshalIndent(output, "", "  ")
-	fmt.Println(string(data))
-	return nil
+	return printResult(action, resp.Success, resp.Data, resp.Error, outputFmt)
 }

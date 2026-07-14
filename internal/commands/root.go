@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/browser-cli/internal/browser"
 )
 
 var (
@@ -18,6 +20,7 @@ var (
 	proxy       string
 	idleTimeout time.Duration
 	statePath   string
+	dataDir     string
 
 	// Version
 	version string
@@ -62,20 +65,26 @@ OUTPUT:
   browser-cli --output json navigate https://example.com
 `,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		// Reserved for future global setup (e.g. structured logger binding).
-		_, _, _ = cmd, args, outputFmt
+		// Initialize the data directory so the client knows where the
+		// socket lives. The server process does its own InitDataDir in
+		// initServerEnv, but the client needs to resolve the socket path
+		// to connect to an already-running server.
+		// Skip for subcommands that don't need the server (help, etc).
+		_ = browser.InitDataDir(dataDir)
+		_ = cmd
+		_ = args
 	},
 }
 
 func init() {
-	rootCmd.PersistentFlags().StringVarP(&browserType, "browser", "b", "chromium", 
+	rootCmd.PersistentFlags().StringVarP(&browserType, "browser", "b", "chromium",
 		"Browser engine: chromium (default), firefox, webkit")
-	rootCmd.PersistentFlags().BoolVar(&headless, "headless", true, 
+	rootCmd.PersistentFlags().BoolVar(&headless, "headless", true,
 		"Run browser in headless mode (no visible window)")
-	rootCmd.PersistentFlags().DurationVarP(&timeout, "timeout", "t", 30*time.Second, 
+	rootCmd.PersistentFlags().DurationVarP(&timeout, "timeout", "t", 30*time.Second,
 		"Default timeout for operations (e.g. 30s, 1m)")
-	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "markdown", 
-		"Output format: json (recommended for AI), markdown (human-readable)")
+	rootCmd.PersistentFlags().StringVarP(&outputFmt, "output", "o", "json",
+		"Output format: json (default, recommended for AI), markdown (human-readable)")
 	rootCmd.PersistentFlags().StringVarP(&sessionID, "session", "s", "default",
 		"Session ID for isolated browser context (each session gets its own cookies/storage)")
 	rootCmd.PersistentFlags().StringVar(&proxy, "proxy", "",
@@ -84,4 +93,6 @@ func init() {
 		"Auto-shutdown server after idle period (e.g. 30m, 1h, 0 to disable)")
 	rootCmd.PersistentFlags().StringVar(&statePath, "state", "",
 		"Path to storage state JSON file (cookies+localStorage) for login reuse")
+	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "",
+		"Data directory for socket, cookies, and state (default: ~/.local/share/browser-cli or $BROWSER_CLI_HOME)")
 }

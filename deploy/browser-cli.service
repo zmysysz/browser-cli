@@ -1,0 +1,55 @@
+# Browser-CLI systemd service template
+#
+# Installation:
+#   1. Copy to /etc/systemd/system/browser-cli.service
+#   2. Edit User, Group, and Environment vars as needed
+#   3. systemctl daemon-reload
+#   4. systemctl enable --now browser-cli
+#
+# Logs are available via: journalctl -u browser-cli -f
+
+[Unit]
+Description=Browser-CLI Server for AI Agent Browser Automation
+After=network.target
+
+[Service]
+Type=simple
+
+# Run as a dedicated user (create one if needed: useradd -r -s /bin/false browser-cli)
+User=browser-cli
+Group=browser-cli
+
+# Data directory (cookies, state, socket live here)
+# Create: install -d -o browser-cli -g browser-cli /var/lib/browser-cli
+Environment=BROWSER_CLI_HOME=/var/lib/browser-cli
+
+# Log format: text (default) or json (for structured log collectors)
+Environment=BROWSER_CLI_LOG_LEVEL=info
+Environment=BROWSER_CLI_LOG_FORMAT=json
+
+# Start the server in foreground (systemd manages the lifecycle)
+ExecStart=/usr/local/bin/browser-cli server \
+    --headless \
+    --idle-timeout 0 \
+    --log-level ${BROWSER_CLI_LOG_LEVEL} \
+    --log-format ${BROWSER_CLI_LOG_FORMAT}
+
+# Restart on crash
+Restart=on-failure
+RestartSec=5
+
+# Graceful shutdown: send SIGTERM, wait, then SIGKILL
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/browser-cli
+# Playwright needs to write to /tmp for browser profiles
+ReadWritePaths=/tmp
+
+[Install]
+WantedBy=multi-user.target

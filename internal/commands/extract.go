@@ -17,19 +17,33 @@ The browser server is auto-started if not running.
 ARGUMENTS:
   file - Optional filename for the screenshot (default: screenshot.png)
 
+FLAGS:
+  --base64  Return the screenshot as base64-encoded data in JSON output
+            instead of writing to a file. Useful for remote AI agents
+            that cannot access the filesystem.
+
 EXAMPLES:
   browser-cli screenshot
   browser-cli screenshot page.png
-  browser-cli screenshot /tmp/capture.png`,
+  browser-cli screenshot /tmp/capture.png
+  browser-cli --output json screenshot --base64`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		path := "screenshot.png"
-		if len(args) > 0 {
-			path = args[0]
+		params := map[string]interface{}{}
+		base64Mode, _ := cmd.Flags().GetBool("base64")
+		if base64Mode {
+			params["base64"] = true
+		} else {
+			path := "screenshot.png"
+			if len(args) > 0 {
+				path = args[0]
+			}
+			params["path"] = path
 		}
-		return sendCommand("screenshot", map[string]interface{}{"path": path})
+		return sendCommand("screenshot", params)
 	},
 }
+
 
 var textCmd = &cobra.Command{
 	Use:   "text",
@@ -38,16 +52,26 @@ var textCmd = &cobra.Command{
 
 The browser server is auto-started if not running.
 
+FLAGS:
+  --max-length <n>  Maximum characters to return (prevents token blowup on large pages)
+
 OUTPUT:
-  • content - The visible text content of the page
+  - text      - The visible text content of the page
+  - truncated - true if the text was cut short by --max-length
 
 EXAMPLES:
   browser-cli text
+  browser-cli text --max-length 5000
   browser-cli --output json text`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return sendCommand("text", nil)
+		params := map[string]interface{}{}
+		if ml, _ := cmd.Flags().GetInt("max-length"); ml > 0 {
+			params["max_length"] = ml
+		}
+		return sendCommand("text", params)
 	},
 }
+
 
 var elementsCmd = &cobra.Command{
 	Use:   "elements <selector>",
@@ -142,4 +166,7 @@ func init() {
 	rootCmd.AddCommand(elementsCmd)
 	rootCmd.AddCommand(evalCmd)
 	rootCmd.AddCommand(evalFileCmd)
+
+	textCmd.Flags().Int("max-length", 0, "Maximum characters to return (0 = no limit)")
+	screenshotCmd.Flags().Bool("base64", false, "Return screenshot as base64 data instead of writing to file")
 }

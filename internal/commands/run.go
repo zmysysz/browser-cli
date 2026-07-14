@@ -67,11 +67,15 @@ EXAMPLES:
 			return fmt.Errorf("no valid actions to execute")
 		}
 
+		stopOnError, _ := cmd.Flags().GetBool("stop-on-error")
+
 		return sendCommand("run", map[string]interface{}{
-			"actions": actionList,
+			"actions":       actionList,
+			"stop_on_error": stopOnError,
 		})
 	},
 }
+
 
 func parseActions(s string) []string {
 	// Smart split: don't split semicolons inside eval command
@@ -346,4 +350,5 @@ func parseQuotedArgs(args []string) ([]string, error) {
 
 func init() {
 	rootCmd.AddCommand(runCmd)
+	runCmd.Flags().Bool("stop-on-error", false, "Abort the pipeline on the first step that fails")
 }
